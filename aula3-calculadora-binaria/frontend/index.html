@@ -1,3 +1,149 @@
 <!DOCTYPE html>
-<html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Calculadora Binaria ESP32-C3</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      text-align: center;
+      margin: 40px auto;
+      max-width: 700px;
+      padding: 0 16px;
+    }
+
+    input {
+      width: 180px;
+      padding: 10px;
+      margin: 10px;
+      font-size: 24px;
+      text-align: center;
+      letter-spacing: 4px;
+    }
+
+    button {
+      padding: 12px 24px;
+      margin: 10px;
+      font-size: 20px;
+      cursor: pointer;
+    }
+
+    .card {
+      margin: 20px auto;
+      padding: 16px;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      max-width: 520px;
+      text-align: left;
+    }
+
+    .ok {
+      color: green;
+      font-weight: bold;
+    }
+
+    .erro {
+      color: red;
+      font-weight: bold;
+    }
+
+    code {
+      font-size: 18px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Calculadora Binaria ESP32-C3</h1>
+
+  <p>
+    Digite operandos de 4 bits em complemento de dois.
+    Intervalo representavel: <strong>-8 a +7</strong>.
+  </p>
+
+  <div>
+    <input id="a" maxlength="4" placeholder="A: 0000">
+  </div>
+
+  <div>
+    <input id="b" maxlength="4" placeholder="B: 0000">
+  </div>
+
+  <div>
+    <button id="btnAdd" type="button">SOMA</button>
+    <button id="btnSub" type="button">SUBTRACAO</button>
+  </div>
+
+  <div class="card">
+    <h2>Resultado</h2>
+    <p>Status: <span id="status">Aguardando entrada</span></p>
+    <p>Operacao: <code id="operacao">-</code></p>
+    <p>A decimal: <code id="aDec">-</code></p>
+    <p>B decimal: <code id="bDec">-</code></p>
+    <p>Resultado decimal completo: <code id="resultadoDecimalCompleto">-</code></p>
+    <p>Resultado armazenado em 4 bits: <code id="resultadoBinario">----</code></p>
+    <p>Resultado interpretado em complemento de dois: <code id="resultadoDecimal4Bits">-</code></p>
+    <p>Overflow: <code id="overflow">-</code></p>
+  </div>
+
+  <script>
+    function isBinary4(value) {
+      return /^[01]{4}$/.test(value);
+    }
+
+    function setStatus(message, isError) {
+      const status = document.getElementById("status");
+      status.textContent = message;
+      status.className = isError ? "erro" : "ok";
+    }
+
+    function sendOperation(op) {
+      const a = document.getElementById("a").value.trim();
+      const b = document.getElementById("b").value.trim();
+
+      if (!isBinary4(a) || !isBinary4(b)) {
+        setStatus("Digite exatamente 4 bits binarios em A e B.", true);
+        return;
+      }
+
+      const url = "/calc?a=" + encodeURIComponent(a) +
+                  "&b=" + encodeURIComponent(b) +
+                  "&op=" + encodeURIComponent(op);
+
+      fetch(url)
+        .then(function(response) {
+          if (!response.ok) {
+            throw new Error("Erro HTTP: " + response.status);
+          }
+          return response.json();
+        })
+        .then(function(data) {
+          setStatus("Calculo realizado pelo ESP32.", false);
+
+          document.getElementById("operacao").textContent = data.operacao;
+          document.getElementById("aDec").textContent = data.aDecimal;
+          document.getElementById("bDec").textContent = data.bDecimal;
+          document.getElementById("resultadoDecimalCompleto").textContent = data.resultadoDecimalCompleto;
+          document.getElementById("resultadoBinario").textContent = data.resultadoBinario4Bits;
+          document.getElementById("resultadoDecimal4Bits").textContent = data.resultadoDecimal4Bits;
+          document.getElementById("overflow").textContent = data.overflow ? "SIM" : "NAO";
+        })
+        .catch(function(err) {
+          setStatus("Falha na requisicao: " + err.message, true);
+        });
+    }
+
+    document.addEventListener("DOMContentLoaded", function() {
+      document.getElementById("btnAdd").addEventListener("click", function() {
+        sendOperation("add");
+      });
+
+      document.getElementById("btnSub").addEventListener("click", function() {
+        sendOperation("sub");
+      });
+    });
+  </script>
+</body>
 </html>
