@@ -1,5 +1,6 @@
 
 #include <WebServer.h>
+#include <WiFi.h>
 
 const int LEDS[] = {12,13,14,15};
 
@@ -22,7 +23,7 @@ void handleCalc(){
         digitalWrite(LEDS[1], (result >> 1) & 0x01); 
         digitalWrite(LEDS[2], (result >> 2) & 0x01); 
         digitalWrite(LEDS[3], (result >> 3) & 0x01);
-        
+
         server.send(200, "text/plain", "OK");
     } else {
         server.send(400, "text/plain", "Faltam parâmetros");
@@ -38,6 +39,8 @@ digitalWrite(LEDS[0], LOW);
 digitalWrite(LEDS[1], LOW);
 digitalWrite(LEDS[2], LOW);
 digitalWrite(LEDS[3], LOW);
+
+WiFi.softAO("Calculadora_ESP32");
 
 server.on("/calc", handleCalc);
 server.begin();
