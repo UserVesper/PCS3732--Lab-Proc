@@ -33,11 +33,15 @@ static_assert(
 );
 
 // ==========================================================
-// CONFIGURACAO DO WI-FI DO WOKWI
+// CONFIGURACAO DO WI-FI PARA O ESP32 REAL
 // ==========================================================
+//
+// Assim como no codigo utilizado durante a aula, o ESP32
+// funciona como Access Point: ele cria uma rede Wi-Fi propria,
+// sem depender de uma rede externa ou de conexao com a Internet.
 
-const char* WIFI_SSID = "Wokwi-GUEST";
-const char* WIFI_PASSWORD = "";
+const char* AP_SSID = "Calculadora_ESP32";
+const char* AP_PASSWORD = "12345678";  // minimo de 8 caracteres
 
 WebServer server(80);
 
@@ -679,8 +683,7 @@ int64_t multiplicar(
 // O operador / nao e utilizado para realizar a operacao.
 // A funcao percorre os bits do dividendo do mais significativo
 // para o menos significativo. Assim, o numero de iteracoes
-// acompanha NUM_BITS_ENTRADA e permite testar operandos com
-// diferentes larguras sem deixar a simulacao excessivamente lenta.
+// acompanha NUM_BITS_ENTRADA.
 //
 // O quociente segue a truncagem em direcao a zero, como ocorre
 // na divisao inteira em C/C++.
@@ -1189,7 +1192,7 @@ void setup() {
 
   Serial.println();
   Serial.println(
-    "Inicializando calculadora binaria."
+    "Inicializando calculadora binaria no ESP32 real."
   );
 
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -1206,36 +1209,60 @@ void setup() {
 
   testarLeds();
 
+  // Configura o ESP32 real como Access Point.
+  // O computador ou celular deve se conectar diretamente
+  // a rede criada pelo microcontrolador.
   WiFi.mode(
-    WIFI_STA
+    WIFI_AP
   );
 
-  WiFi.begin(
-    WIFI_SSID,
-    WIFI_PASSWORD
-  );
+  bool apIniciado =
+    WiFi.softAP(
+      AP_SSID,
+      AP_PASSWORD
+    );
 
-  Serial.print(
-    "Conectando a rede Wokwi-GUEST"
-  );
-
-  while (
-    WiFi.status() != WL_CONNECTED
-  ) {
-    delay(500);
-    Serial.print(".");
+  if (apIniciado) {
+    Serial.println(
+      "Access Point iniciado com sucesso."
+    );
+  } else {
+    Serial.println(
+      "ERRO: falha ao iniciar o Access Point."
+    );
   }
+
+  IPAddress ipDoAccessPoint =
+    WiFi.softAPIP();
 
   Serial.println();
   Serial.println(
-    "Wi-Fi conectado."
+    "===== DADOS DA REDE ====="
   );
 
   Serial.print(
-    "IP interno do ESP32: "
+    "Nome da rede Wi-Fi: "
   );
   Serial.println(
-    WiFi.localIP()
+    AP_SSID
+  );
+
+  Serial.print(
+    "Senha da rede Wi-Fi: "
+  );
+  Serial.println(
+    AP_PASSWORD
+  );
+
+  Serial.print(
+    "IP do ESP32: "
+  );
+  Serial.println(
+    ipDoAccessPoint
+  );
+
+  Serial.println(
+    "========================="
   );
 
   server.on(
@@ -1258,12 +1285,32 @@ void setup() {
 
   server.begin();
 
+  Serial.println();
   Serial.println(
     "Servidor HTTP iniciado."
   );
 
+  Serial.println();
   Serial.println(
-    "Abra no navegador: http://localhost:8180"
+    "===== LINK DE ACESSO ====="
+  );
+
+  Serial.print(
+    "Conecte seu computador ou celular na rede "
+  );
+  Serial.println(
+    AP_SSID
+  );
+
+  Serial.print(
+    "Depois acesse no navegador: http://"
+  );
+  Serial.println(
+    ipDoAccessPoint
+  );
+
+  Serial.println(
+    "=========================="
   );
 }
 
