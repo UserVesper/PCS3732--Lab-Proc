@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "author": "Enzo Santos",
+  "editor": "wokwi",
+  "parts": [
+    {
+      "type": "board-esp32-c3-devkitm-1",
+      "id": "esp",
+      "top": 0,
+      "left": 0,
+      "attrs": {}
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led0",
+      "top": -70,
+      "left": -120,
+      "attrs": {
+        "color": "red",
+        "label": "Bit 0"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led1",
+      "top": -25,
+      "left": -120,
+      "attrs": {
+        "color": "green",
+        "label": "Bit 1"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led2",
+      "top": 20,
+      "left": -120,
+      "attrs": {
+        "color": "blue",
+        "label": "Bit 2"
+      }
+    },
+    {
+      "type": "wokwi-led",
+      "id": "led3",
+      "top": 65,
+      "left": -120,
+      "attrs": {
+        "color": "yellow",
+        "label": "Bit 3"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r0",
+      "top": -60,
+      "left": -55,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r1",
+      "top": -15,
+      "left": -55,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r2",
+      "top": 30,
+      "left": -55,
+      "attrs": {
+        "value": "220"
+      }
+    },
+    {
+      "type": "wokwi-resistor",
+      "id": "r3",
+      "top": 75,
+      "left": -55,
+      "attrs": {
+        "value": "220"
+      }
+    }
+  ],
+  "connections": [
+    ["esp:0", "r0:1", "red", []],
+    ["r0:2", "led0:A", "red", []],
+    ["led0:C", "esp:GND.5", "black", []],
+
+    ["esp:1", "r1:1", "green", []],
+    ["r1:2", "led1:A", "green", []],
+    ["led1:C", "esp:GND.5", "black", []],
+
+    ["esp:2", "r2:1", "blue", []],
+    ["r2:2", "led2:A", "blue", []],
+    ["led2:C", "esp:GND.5", "black", []],
+
+    ["esp:3", "r3:1", "yellow", []],
+    ["r3:2", "led3:A", "yellow", []],
+    ["led3:C", "esp:GND.5", "black", []],
+
+    ["esp:TX", "$serialMonitor:RX", "", []],
+    ["esp:RX", "$serialMonitor:TX", "", []]
+  ],
+  "dependencies": {}
+}
