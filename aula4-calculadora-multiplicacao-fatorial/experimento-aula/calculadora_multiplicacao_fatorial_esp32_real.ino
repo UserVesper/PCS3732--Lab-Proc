@@ -40,7 +40,7 @@ static_assert(
 // funciona como Access Point: ele cria uma rede Wi-Fi propria,
 // sem depender de uma rede externa ou de conexao com a Internet.
 
-const char* AP_SSID = "Calculadora_ESP32";
+const char* AP_SSID = "Calculadora_ESP32_Grupo_E";
 const char* AP_PASSWORD = "12345678";  // minimo de 8 caracteres
 
 WebServer server(80);
