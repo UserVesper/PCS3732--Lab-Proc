@@ -27,7 +27,7 @@ const int CANAL_PWM_SERVO = 2;
 const int RESOLUCAO_PWM_LED_BITS = 10;
 const int RESOLUCAO_PWM_SERVO_BITS = 14;
 
-const int FREQUENCIA_LED_MIN_HZ = 50;
+const int FREQUENCIA_LED_MIN_HZ = 1;
 const int FREQUENCIA_LED_MAX_HZ = 20000;
 const int FREQUENCIA_LED_PADRAO_HZ = 1000;
 
@@ -42,8 +42,8 @@ const int ANGULO_SERVO_PADRAO = 90;
 
 // Faixa inicial conservadora para microservos pequenos.
 // Se o servo vibrar ou forcar mecanicamente nos extremos, reduza a faixa.
-const int SERVO_PULSO_MIN_US = 600;
-const int SERVO_PULSO_MAX_US = 2400;
+const int SERVO_PULSO_MIN_US = 1000;
+const int SERVO_PULSO_MAX_US = 2000;
 
 // Ativa uma verificacao independente do LED no boot, antes do servidor web.
 const bool EXECUTAR_TESTE_INICIAL_LED = true;
@@ -108,8 +108,8 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
     <label for="frequenciaLed">Frequencia PWM (Hz)</label>
     <div class="linha">
-      <input id="frequenciaLed" type="range" min="50" max="20000" step="1">
-      <input id="frequenciaLedNumero" type="number" min="50" max="20000" step="1">
+      <input id="frequenciaLed" type="range" min="1" max="20000" step="1">
+      <input id="frequenciaLedNumero" type="number" min="1" max="20000" step="1">
     </div>
     <button id="btnAplicarLed">Aplicar LED</button>
   </div>
@@ -162,7 +162,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     async function carregarConfiguracao() { await consultar("/config", "Configuracao carregada."); }
     async function aplicarLed() {
       const intensidade = limitar(document.getElementById("intensidadeLedNumero").value, 0, 100);
-      const frequencia = limitar(document.getElementById("frequenciaLedNumero").value, 50, 20000);
+      const frequencia = limitar(document.getElementById("frequenciaLedNumero").value, 1, 20000);
       await consultar(`/led?intensidade=${encodeURIComponent(intensidade)}&frequencia=${encodeURIComponent(frequencia)}`, "PWM do LED atualizado pelo ESP32.");
     }
     async function aplicarServo() {
@@ -171,7 +171,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     }
     document.addEventListener("DOMContentLoaded", async () => {
       sincronizarControles("intensidadeLed", "intensidadeLedNumero", 0, 100);
-      sincronizarControles("frequenciaLed", "frequenciaLedNumero", 50, 20000);
+      sincronizarControles("frequenciaLed", "frequenciaLedNumero", 1, 20000);
       sincronizarControles("anguloServo", "anguloServoNumero", 0, 180);
       document.getElementById("btnAplicarLed").addEventListener("click", aplicarLed);
       document.getElementById("btnAplicarServo").addEventListener("click", aplicarServo);
