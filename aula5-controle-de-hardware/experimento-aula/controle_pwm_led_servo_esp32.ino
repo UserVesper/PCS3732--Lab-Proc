@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESP32Servo.h>
 
 #if __has_include(<esp_arduino_version.h>)
 #include <esp_arduino_version.h>
@@ -18,14 +19,17 @@
 const int PINO_LED_PWM = 4;
 const int PINO_SERVO_PWM = 5;
 
-// Use canais separados por pelo menos uma unidade para evitar que LED e servo
-// compartilhem o mesmo temporizador em versoes antigas do core Arduino-ESP32.
-const int CANAL_PWM_LED = 0;
-const int CANAL_PWM_SERVO = 2;
+// O LED externo continua sendo controlado diretamente pelo periferico LEDC.
+// O canal 5 e reservado para o LED. O servomotor fica sob responsabilidade
+// exclusiva da biblioteca ESP32Servo, que aloca automaticamente um canal livre.
+const int CANAL_PWM_LED = 5;
 
 // No ESP32-C3, use resolucoes de ate 14 bits para LEDC.
 const int RESOLUCAO_PWM_LED_BITS = 10;
-const int RESOLUCAO_PWM_SERVO_BITS = 14;
+
+// Usado somente para exibir na interface web o duty cycle equivalente do servo.
+// A geracao efetiva do sinal do servo e realizada internamente pela ESP32Servo.
+const int RESOLUCAO_PWM_SERVO_REFERENCIA_BITS = 14;
 
 const int FREQUENCIA_LED_MIN_HZ = 1;
 const int FREQUENCIA_LED_MAX_HZ = 20000;
@@ -58,13 +62,13 @@ const char* AP_SSID = "Controle_PWM_ESP32";
 const char* AP_PASSWORD = "12345678";
 
 WebServer server(80);
+Servo servoMotor;
 
 int frequenciaLedHz = FREQUENCIA_LED_PADRAO_HZ;
 int intensidadeLedPercentual = INTENSIDADE_LED_PADRAO;
 int anguloServoGraus = ANGULO_SERVO_PADRAO;
 
 bool ledPwmConfigurado = false;
-bool servoPwmConfigurado = false;
 
 // ==========================================================
 // PAGINA HTML
@@ -204,9 +208,11 @@ int obterPulsoServoUs() {
   return map(anguloServoGraus, ANGULO_SERVO_MIN, ANGULO_SERVO_MAX, SERVO_PULSO_MIN_US, SERVO_PULSO_MAX_US);
 }
 
-uint32_t obterDutyServo() {
+uint32_t obterDutyServoReferencia() {
   const int periodoUs = 1000000 / FREQUENCIA_SERVO_HZ;
-  return (static_cast<uint32_t>(obterPulsoServoUs()) * obterDutyMaximo(RESOLUCAO_PWM_SERVO_BITS)) / periodoUs;
+  return (static_cast<uint32_t>(obterPulsoServoUs()) *
+          obterDutyMaximo(RESOLUCAO_PWM_SERVO_REFERENCIA_BITS)) /
+         periodoUs;
 }
 
 bool escreverPwm(int pino, int canal, uint32_t duty) {
@@ -234,18 +240,16 @@ bool configurarOuAtualizarPwmLed() {
 #endif
 }
 
-bool configurarPwmServo() {
-  if (servoPwmConfigurado) return true;
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  servoPwmConfigurado = ledcAttachChannel(PINO_SERVO_PWM, FREQUENCIA_SERVO_HZ, RESOLUCAO_PWM_SERVO_BITS, CANAL_PWM_SERVO);
-#else
-  const double frequenciaObtida = ledcSetup(CANAL_PWM_SERVO, FREQUENCIA_SERVO_HZ, RESOLUCAO_PWM_SERVO_BITS);
-  if (frequenciaObtida != 0) {
-    ledcAttachPin(PINO_SERVO_PWM, CANAL_PWM_SERVO);
-    servoPwmConfigurado = true;
-  }
-#endif
-  return servoPwmConfigurado;
+bool configurarServo() {
+  if (servoMotor.attached()) return true;
+
+  // Servos convencionais usam atualizacao a 50 Hz.
+  // A faixa de 1000 a 2000 us segue o grafico:
+  // 0 graus -> 1,0 ms | 90 graus -> 1,5 ms | 180 graus -> 2,0 ms.
+  servoMotor.setPeriodHertz(FREQUENCIA_SERVO_HZ);
+  servoMotor.attach(PINO_SERVO_PWM, SERVO_PULSO_MIN_US, SERVO_PULSO_MAX_US);
+
+  return servoMotor.attached();
 }
 
 String estadoAtualJson() {
@@ -258,8 +262,8 @@ String estadoAtualJson() {
   json += "\"dutyMaximoLed\":" + String(obterDutyMaximo(RESOLUCAO_PWM_LED_BITS)) + ",";
   json += "\"anguloServoGraus\":" + String(anguloServoGraus) + ",";
   json += "\"pulsoServoUs\":" + String(obterPulsoServoUs()) + ",";
-  json += "\"dutyServo\":" + String(obterDutyServo()) + ",";
-  json += "\"dutyMaximoServo\":" + String(obterDutyMaximo(RESOLUCAO_PWM_SERVO_BITS));
+  json += "\"dutyServo\":" + String(obterDutyServoReferencia()) + ",";
+  json += "\"dutyMaximoServo\":" + String(obterDutyMaximo(RESOLUCAO_PWM_SERVO_REFERENCIA_BITS));
   json += "}";
   return json;
 }
@@ -273,9 +277,13 @@ bool aplicarPwmLed() {
   return escreverPwm(PINO_LED_PWM, CANAL_PWM_LED, obterDutyLed());
 }
 
-bool aplicarPwmServo() {
-  if (!configurarPwmServo()) return false;
-  return escreverPwm(PINO_SERVO_PWM, CANAL_PWM_SERVO, obterDutyServo());
+bool aplicarPosicaoServo() {
+  if (!configurarServo()) return false;
+
+  // A biblioteca ESP32Servo converte internamente o angulo para a largura
+  // adequada do pulso PWM, respeitando os limites definidos no attach().
+  servoMotor.write(anguloServoGraus);
+  return true;
 }
 
 void registrarEstadoNoSerial() {
@@ -285,10 +293,10 @@ void registrarEstadoNoSerial() {
                 PINO_LED_PWM, intensidadeLedPercentual, frequenciaLedHz,
                 static_cast<unsigned long>(obterDutyLed()),
                 static_cast<unsigned long>(obterDutyMaximo(RESOLUCAO_PWM_LED_BITS)));
-  Serial.printf("Servo: GPIO %d | angulo=%d graus | pulso=%d us | duty=%lu/%lu | frequencia=%d Hz\n",
+  Serial.printf("Servo ESP32Servo: GPIO %d | angulo=%d graus | pulso=%d us | duty equivalente=%lu/%lu | frequencia=%d Hz\n",
                 PINO_SERVO_PWM, anguloServoGraus, obterPulsoServoUs(),
-                static_cast<unsigned long>(obterDutyServo()),
-                static_cast<unsigned long>(obterDutyMaximo(RESOLUCAO_PWM_SERVO_BITS)),
+                static_cast<unsigned long>(obterDutyServoReferencia()),
+                static_cast<unsigned long>(obterDutyMaximo(RESOLUCAO_PWM_SERVO_REFERENCIA_BITS)),
                 FREQUENCIA_SERVO_HZ);
   Serial.println("======================");
 }
@@ -349,7 +357,7 @@ void responderControleServo() {
 
   anguloServoGraus = limitarInteiro(server.arg("angulo").toInt(), ANGULO_SERVO_MIN, ANGULO_SERVO_MAX);
 
-  if (!aplicarPwmServo()) {
+  if (!aplicarPosicaoServo()) {
     server.send(500, "application/json", "{\"erro\":\"Nao foi possivel configurar o PWM do servo.\"}");
     return;
   }
@@ -389,11 +397,12 @@ void setup() {
 
   Serial.println();
   Serial.println("Inicializando controle PWM no ESP32-C3.");
+  Serial.println("Servomotor controlado pela biblioteca ESP32Servo.");
   Serial.printf("LED PWM: GPIO %d | Servo PWM: GPIO %d\n", PINO_LED_PWM, PINO_SERVO_PWM);
 
   if (!aplicarPwmLed()) Serial.println("ERRO: falha na configuracao inicial do LED PWM.");
   delay(30);
-  if (!aplicarPwmServo()) Serial.println("ERRO: falha na configuracao inicial do servo PWM.");
+  if (!aplicarPosicaoServo()) Serial.println("ERRO: falha na configuracao inicial do servo PWM.");
 
   executarTesteInicialLed();
 
