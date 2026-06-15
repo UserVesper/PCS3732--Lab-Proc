@@ -15,8 +15,13 @@
 //
 // LED built-in:
 // Na placa usada nas aulas, o LED RGB onboard e um NeoPixel no GPIO8.
+//
+// Botao SOS:
+// GPIO2 -> botao -> GND
+// O pull-up interno mantem o pino em HIGH quando o botao esta solto.
 
 const int PINO_LDR_ADC = 3;
+const int PINO_BOTAO_SOS = 2;
 const int PINO_LED_RGB = 8;
 const int NUMERO_LEDS_RGB = 1;
 
@@ -29,6 +34,8 @@ const int LIMIAR_BAIXA_LUMINOSIDADE = 1400;
 
 const unsigned long INTERVALO_LEITURA_LDR_MS = 1000;
 const unsigned long INTERVALO_PISCA_LED_MS = 2000;
+const unsigned long TEMPO_LED_VERMELHO_SOS_MS = 3000;
+const unsigned long INTERVALO_DEBOUNCE_BOTAO_MS = 60;
 
 // ==========================================================
 // CONFIGURACAO DO WI-FI
@@ -44,9 +51,15 @@ int valorLdrAdc = 0;
 int luminosidadePercentual = 0;
 bool baixaLuminosidade = false;
 bool ledAmareloLigado = false;
+bool sosAtivo = false;
+bool ledVermelhoSosLigado = false;
 
 unsigned long ultimaLeituraLdrMs = 0;
 unsigned long ultimaAlternanciaLedMs = 0;
+unsigned long inicioSosMs = 0;
+unsigned long ultimoSosAceitoMs = 0;
+
+volatile bool interrupcaoSosPendente = false;
 
 // ==========================================================
 // PAGINA HTML
@@ -130,6 +143,11 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
       color: #b42318;
       font-weight: bold;
     }
+
+    .status-sos {
+      color: #b42318;
+      font-weight: bold;
+    }
   </style>
 </head>
 
@@ -162,6 +180,11 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
     </p>
 
     <p>
+      SOS:
+      <span id="sos">Aguardando acionamento...</span>
+    </p>
+
+    <p>
       Ultima atualizacao:
       <code><span id="ultimaAtualizacao">--</span></code>
     </p>
@@ -173,6 +196,18 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
       elemento.className = baixaLuminosidade
         ? "status-alerta"
+        : "status-ok";
+    }
+
+    function atualizarSos(dados) {
+      const elemento = document.getElementById("sos");
+
+      elemento.textContent = dados.sosAtivo
+        ? "Ativo - LED vermelho com prioridade"
+        : "Inativo";
+
+      elemento.className = dados.sosAtivo
+        ? "status-sos"
         : "status-ok";
     }
 
@@ -195,6 +230,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
         new Date().toLocaleTimeString();
 
       atualizarClasseCondicao(dados.baixaLuminosidade);
+      atualizarSos(dados);
     }
 
     async function carregarLeitura() {
@@ -239,9 +275,18 @@ void apagarLedRgb() {
   ledRgb.show();
 }
 
+void escreverLedVermelho() {
+  ledRgb.setPixelColor(0, ledRgb.Color(255, 0, 0));
+  ledRgb.show();
+}
+
 void escreverLedAmarelo() {
   ledRgb.setPixelColor(0, ledRgb.Color(255, 200, 0));
   ledRgb.show();
+}
+
+void IRAM_ATTR tratarInterrupcaoSos() {
+  interrupcaoSosPendente = true;
 }
 
 void atualizarLeituraLdr() {
@@ -288,8 +333,15 @@ void atualizarSensorPeriodicamente() {
 void atualizarPiscaLedBaixaLuminosidade() {
   const unsigned long agora = millis();
 
+  if (sosAtivo) {
+    ledVermelhoSosLigado = true;
+    escreverLedVermelho();
+    return;
+  }
+
   if (!baixaLuminosidade) {
     ledAmareloLigado = false;
+    ledVermelhoSosLigado = false;
     apagarLedRgb();
     ultimaAlternanciaLedMs = agora;
     return;
@@ -310,6 +362,60 @@ void atualizarPiscaLedBaixaLuminosidade() {
   }
 }
 
+void acionarSos() {
+  sosAtivo = true;
+  ledAmareloLigado = false;
+  ledVermelhoSosLigado = true;
+  inicioSosMs = millis();
+  ultimaAlternanciaLedMs = inicioSosMs;
+
+  escreverLedVermelho();
+
+  Serial.println(
+    "SOS acionado: LED built-in vermelho por 3 segundos."
+  );
+}
+
+void tratarBotaoSosComDebounce() {
+  if (!interrupcaoSosPendente) {
+    return;
+  }
+
+  interrupcaoSosPendente = false;
+
+  const unsigned long agora = millis();
+
+  if (agora - ultimoSosAceitoMs < INTERVALO_DEBOUNCE_BOTAO_MS) {
+    return;
+  }
+
+  if (digitalRead(PINO_BOTAO_SOS) != LOW) {
+    return;
+  }
+
+  ultimoSosAceitoMs = agora;
+  acionarSos();
+}
+
+void atualizarEstadoSos() {
+  if (!sosAtivo) {
+    return;
+  }
+
+  if (millis() - inicioSosMs >= TEMPO_LED_VERMELHO_SOS_MS) {
+    sosAtivo = false;
+    ledVermelhoSosLigado = false;
+    ledAmareloLigado = false;
+    ultimaAlternanciaLedMs = 0;
+
+    apagarLedRgb();
+
+    Serial.println(
+      "SOS finalizado: retornando as condicoes normais."
+    );
+  }
+}
+
 // ==========================================================
 // GERACAO DO JSON
 // ==========================================================
@@ -319,6 +425,9 @@ String estadoAtualJson() {
 
   json += "\"pinoLdrAdc\":" +
           String(PINO_LDR_ADC) + ",";
+
+  json += "\"pinoBotaoSos\":" +
+          String(PINO_BOTAO_SOS) + ",";
 
   json += "\"valorLdrAdc\":" +
           String(valorLdrAdc) + ",";
@@ -338,6 +447,22 @@ String estadoAtualJson() {
 
   json += "\"ledAmareloLigado\":";
   json += ledAmareloLigado ? "true" : "false";
+  json += ",";
+
+  json += "\"sosAtivo\":";
+  json += sosAtivo ? "true" : "false";
+  json += ",";
+
+  json += "\"ledVermelhoSosLigado\":";
+  json += ledVermelhoSosLigado ? "true" : "false";
+  json += ",";
+
+  json += "\"tempoLedVermelhoSosMs\":";
+  json += String(TEMPO_LED_VERMELHO_SOS_MS);
+  json += ",";
+
+  json += "\"debounceBotaoMs\":";
+  json += String(INTERVALO_DEBOUNCE_BOTAO_MS);
 
   json += "}";
 
@@ -417,10 +542,17 @@ void setup() {
 
   analogReadResolution(RESOLUCAO_ADC_BITS);
   pinMode(PINO_LDR_ADC, INPUT);
+  pinMode(PINO_BOTAO_SOS, INPUT_PULLUP);
 
   ledRgb.begin();
   ledRgb.setBrightness(70);
   apagarLedRgb();
+
+  attachInterrupt(
+    digitalPinToInterrupt(PINO_BOTAO_SOS),
+    tratarInterrupcaoSos,
+    FALLING
+  );
 
   atualizarLeituraLdr();
 
@@ -458,6 +590,8 @@ void setup() {
 void loop() {
   server.handleClient();
   atualizarSensorPeriodicamente();
+  tratarBotaoSosComDebounce();
+  atualizarEstadoSos();
   atualizarPiscaLedBaixaLuminosidade();
 
   delay(2);
