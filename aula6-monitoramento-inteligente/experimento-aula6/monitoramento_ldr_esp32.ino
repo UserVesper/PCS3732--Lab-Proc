@@ -41,7 +41,7 @@ const unsigned long INTERVALO_DEBOUNCE_BOTAO_MS = 60;
 // CONFIGURACAO DO WI-FI
 // ==========================================================
 
-const char* AP_SSID = "Monitoramento_LDR_ESP32_Grupo6";
+const char* AP_SSID = "Monitoramento_LDR_ESP32_GrupoE";
 const char* AP_PASSWORD = "12345678";
 
 WebServer server(80);
