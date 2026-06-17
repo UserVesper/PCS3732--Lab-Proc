@@ -5,37 +5,25 @@
 // =========================
 // CONFIGURACAO DO WIFI
 // =========================
-// Coloque aqui o Wi-Fi real que o ESP32-C3 deve acessar.
-// Importante: ESP32 usa Wi-Fi 2.4 GHz, nao 5 GHz.
-const char* WIFI_SSID = "NOME_DO_SEU_WIFI";
-const char* WIFI_PASSWORD = "SENHA_DO_SEU_WIFI";
+#define USE_SOFT_AP false
 
-// Caso o ESP32 nao consiga conectar ao Wi-Fi acima,
-// ele cria uma rede propria aberta com este nome.
+const char* WIFI_SSID = "Wokwi-GUEST";
+const char* WIFI_PASSWORD = "";
+
 const char* AP_SSID = "Monitoramento_ESP32";
 const char* AP_PASSWORD = "";
 
 WebServer server(80);
 
-// =========================
-// SERIAL
-// =========================
+// Saida serial usada no terminal do Wokwi
 #define DEBUG_SERIAL Serial
 
 // =========================
 // PINOS
 // =========================
-const int LDR_PIN = 4;          // GPIO4 - entrada analogica ADC
-const int SOS_BUTTON_PIN = 5;   // GPIO5 - botao SOS com INPUT_PULLUP
-
-// LED RGB externo, tipo comum catodo
-const int RGB_R_PIN = 0;        // GPIO0 - vermelho
-const int RGB_G_PIN = 1;        // GPIO1 - verde
-const int RGB_B_PIN = 3;        // GPIO3 - azul
-
-// Use false para LED RGB comum catodo.
-// Use true se o seu LED RGB for comum anodo.
-const bool RGB_COMMON_ANODE = false;
+const int LDR_PIN = 4;          // GPIO4 - ADC
+const int SOS_BUTTON_PIN = 5;   // GPIO5 - botao SOS
+const int RGB_LED_PIN = 8;      // GPIO8 - LED RGB built-in do ESP32-C3 no Wokwi
 
 // =========================
 // CONFIGURACAO DO LDR / ADC
@@ -45,9 +33,6 @@ const int ADC_MAX_VALUE = 4095;
 
 const unsigned long ADC_READ_INTERVAL_MS = 1000;
 
-// Com a montagem recomendada:
-// 3V3 -> LDR -> GPIO4 -> resistor 10k -> GND
-// Em baixa luminosidade, o valor ADC tende a diminuir.
 const int LOW_LIGHT_THRESHOLD = 1500;
 const bool LOW_LIGHT_WHEN_ADC_BELOW_THRESHOLD = true;
 
@@ -80,35 +65,23 @@ bool lowLight = false;
 unsigned long sosCounter = 0;
 String ledStatus = "desligado";
 
-bool usingSoftAP = false;
-
 // =========================
-// FUNCOES DO LED RGB EXTERNO
+// FUNCOES DO LED RGB
 // =========================
-void writeRgbPin(int pin, bool state) {
-  if (RGB_COMMON_ANODE) {
-    digitalWrite(pin, state ? LOW : HIGH);
-  } else {
-    digitalWrite(pin, state ? HIGH : LOW);
-  }
-}
-
-void setRgbLed(bool red, bool green, bool blue) {
-  writeRgbPin(RGB_R_PIN, red);
-  writeRgbPin(RGB_G_PIN, green);
-  writeRgbPin(RGB_B_PIN, blue);
+void setRgbLed(uint8_t r, uint8_t g, uint8_t b) {
+  neopixelWrite(RGB_LED_PIN, r, g, b);
 }
 
 void ledOff() {
-  setRgbLed(false, false, false);
+  setRgbLed(0, 0, 0);
 }
 
 void ledRed() {
-  setRgbLed(true, false, false);
+  setRgbLed(255, 0, 0);
 }
 
 void ledYellow() {
-  setRgbLed(true, true, false);
+  setRgbLed(255, 180, 0);
 }
 
 // =========================
@@ -182,85 +155,25 @@ void printAccessLinks() {
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.println("===== LINKS DE ACESSO =====");
 
-  if (usingSoftAP) {
-    DEBUG_SERIAL.print("Rede criada pelo ESP32: ");
-    DEBUG_SERIAL.println(AP_SSID);
-    DEBUG_SERIAL.print("Acesse: http://");
-    DEBUG_SERIAL.println(WiFi.softAPIP());
-  } else {
-    DEBUG_SERIAL.print("Wi-Fi conectado: ");
-    DEBUG_SERIAL.println(WiFi.SSID());
+#if USE_SOFT_AP
+  DEBUG_SERIAL.print("ESP32 real / hotspot: http://");
+  DEBUG_SERIAL.println(WiFi.softAPIP());
+#else
+  DEBUG_SERIAL.print("IP interno do ESP32 no Wokwi: http://");
+  DEBUG_SERIAL.println(WiFi.localIP());
 
-    DEBUG_SERIAL.print("IP do ESP32: ");
-    DEBUG_SERIAL.println(WiFi.localIP());
+  DEBUG_SERIAL.println("localhost: http://localhost:8180");
 
-    DEBUG_SERIAL.print("Acesse: http://");
-    DEBUG_SERIAL.println(WiFi.localIP());
+  DEBUG_SERIAL.print("Endpoint JSON no Wokwi: http://");
+  DEBUG_SERIAL.print(WiFi.localIP());
+  DEBUG_SERIAL.println("/dados");
 
-    DEBUG_SERIAL.print("Endpoint JSON: http://");
-    DEBUG_SERIAL.print(WiFi.localIP());
-    DEBUG_SERIAL.println("/dados");
-  }
+  DEBUG_SERIAL.println("Endpoint JSON localhost: http://localhost:8180/dados");
+#endif
 
   DEBUG_SERIAL.println("===========================");
   DEBUG_SERIAL.println();
   DEBUG_SERIAL.flush();
-}
-
-// =========================
-// WIFI
-// =========================
-void startSoftAP() {
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
-
-  usingSoftAP = true;
-
-  DEBUG_SERIAL.println();
-  DEBUG_SERIAL.println("Nao foi possivel conectar ao Wi-Fi configurado.");
-  DEBUG_SERIAL.println("Modo Access Point iniciado.");
-  DEBUG_SERIAL.print("SSID: ");
-  DEBUG_SERIAL.println(AP_SSID);
-  DEBUG_SERIAL.print("IP do AP: ");
-  DEBUG_SERIAL.println(WiFi.softAPIP());
-}
-
-void connectToWiFiOrStartAP() {
-  usingSoftAP = false;
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  DEBUG_SERIAL.print("Conectando ao Wi-Fi: ");
-  DEBUG_SERIAL.println(WIFI_SSID);
-
-  unsigned long startAttemptTime = millis();
-  const unsigned long WIFI_TIMEOUT_MS = 20000;
-
-  while (WiFi.status() != WL_CONNECTED &&
-         millis() - startAttemptTime < WIFI_TIMEOUT_MS) {
-    delay(500);
-    DEBUG_SERIAL.print(".");
-    DEBUG_SERIAL.flush();
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    DEBUG_SERIAL.println();
-    DEBUG_SERIAL.println("Wi-Fi conectado com sucesso.");
-    DEBUG_SERIAL.print("SSID: ");
-    DEBUG_SERIAL.println(WiFi.SSID());
-    DEBUG_SERIAL.print("IP: ");
-    DEBUG_SERIAL.println(WiFi.localIP());
-    DEBUG_SERIAL.print("Gateway: ");
-    DEBUG_SERIAL.println(WiFi.gatewayIP());
-    DEBUG_SERIAL.print("Mascara: ");
-    DEBUG_SERIAL.println(WiFi.subnetMask());
-    DEBUG_SERIAL.print("RSSI: ");
-    DEBUG_SERIAL.print(WiFi.RSSI());
-    DEBUG_SERIAL.println(" dBm");
-  } else {
-    startSoftAP();
-  }
 }
 
 // =========================
@@ -352,7 +265,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="card">
-    <h2>LED RGB</h2>
+    <h2>LED Built-in</h2>
     <p>Estado atual:</p>
     <div class="status" id="ledStatus">---</div>
   </div>
@@ -428,19 +341,16 @@ void setup() {
   delay(1000);
 
   DEBUG_SERIAL.println();
-  DEBUG_SERIAL.println("--- Iniciando Monitoramento LDR + SOS ESP32-C3 REAL ---");
+  DEBUG_SERIAL.println("--- Iniciando Monitoramento LDR + SOS ESP32-C3 ---");
   DEBUG_SERIAL.flush();
 
   pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
-
-  pinMode(RGB_R_PIN, OUTPUT);
-  pinMode(RGB_G_PIN, OUTPUT);
-  pinMode(RGB_B_PIN, OUTPUT);
-
-  ledOff();
+  pinMode(RGB_LED_PIN, OUTPUT);
 
   analogReadResolution(ADC_RESOLUTION_BITS);
   analogSetPinAttenuation(LDR_PIN, ADC_11db);
+
+  ledOff();
 
   attachInterrupt(
     digitalPinToInterrupt(SOS_BUTTON_PIN),
@@ -448,7 +358,45 @@ void setup() {
     FALLING
   );
 
-  connectToWiFiOrStartAP();
+#if USE_SOFT_AP
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  DEBUG_SERIAL.println("Modo Access Point iniciado.");
+  DEBUG_SERIAL.print("SSID: ");
+  DEBUG_SERIAL.println(AP_SSID);
+  DEBUG_SERIAL.print("IP do AP: ");
+  DEBUG_SERIAL.println(WiFi.softAPIP());
+#else
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  DEBUG_SERIAL.print("Conectando ao WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    DEBUG_SERIAL.print(".");
+    DEBUG_SERIAL.flush();
+  }
+
+  DEBUG_SERIAL.println();
+  DEBUG_SERIAL.println("WiFi conectado.");
+  DEBUG_SERIAL.print("SSID: ");
+  DEBUG_SERIAL.println(WiFi.SSID());
+
+  DEBUG_SERIAL.print("IP: ");
+  DEBUG_SERIAL.println(WiFi.localIP());
+
+  DEBUG_SERIAL.print("Gateway: ");
+  DEBUG_SERIAL.println(WiFi.gatewayIP());
+
+  DEBUG_SERIAL.print("Mascara: ");
+  DEBUG_SERIAL.println(WiFi.subnetMask());
+
+  DEBUG_SERIAL.print("RSSI: ");
+  DEBUG_SERIAL.print(WiFi.RSSI());
+  DEBUG_SERIAL.println(" dBm");
+#endif
 
   server.on("/", handleRoot);
   server.on("/dados", handleDados);
