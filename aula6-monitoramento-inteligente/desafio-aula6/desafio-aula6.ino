@@ -27,7 +27,7 @@ WebServer server(80);
 // PINOS
 // =========================
 const int LDR_PIN = 4;          // GPIO4 - entrada analogica ADC
-const int SOS_BUTTON_PIN = 5;   // GPIO5 - botao SOS com INPUT_PULLUP
+const int SOS_BUTTON_PIN = 5;   // GPIO5 - botao com INPUT_PULLUP
 
 // LED BuiltIn da placa ESP32-C3 usado como NeoPixel
 // Baseado no codigo aula2: 1 LED NeoPixel no GPIO8.
@@ -41,35 +41,40 @@ Adafruit_NeoPixel led(NUMERO_LEDS_BUILTIN, PINO_LED_BUILTIN, NEO_GRB + NEO_KHZ80
 // =========================
 const int ADC_RESOLUTION_BITS = 12;
 const int ADC_MAX_VALUE = 4095;
-
 const unsigned long ADC_READ_INTERVAL_MS = 1000;
 
 // Na sua montagem real, foi observado que:
 // - lanterna direta no LDR  -> valor ADC menor
 // - sensor tampado/escuro   -> valor ADC maior
-// Portanto, baixa luminosidade acontece quando o ADC fica ACIMA do limiar.
-const int LOW_LIGHT_THRESHOLD = 3000;
-const bool LOW_LIGHT_WHEN_ADC_BELOW_THRESHOLD = false;
+// Por isso, o percentual de luminosidade e calculado de forma invertida:
+// ADC alto  -> pouca luz  -> percentual baixo
+// ADC baixo -> muita luz   -> percentual alto
+const int LOW_LIGHT_PERCENT_THRESHOLD = 30; // <= 30% entra em modo noturno
 
 // =========================
-// CONFIGURACAO DO SOS
+// CONFIGURACAO DO BOTAO DE TRAVESSIA
 // =========================
-const unsigned long SOS_LED_TIME_MS = 3000;
+const unsigned long PEDESTRIAN_RED_TIME_MS = 3000;
 const unsigned long DEBOUNCE_TIME_US = 200000;
 
 // =========================
-// CONFIGURACAO DO LED
+// CONFIGURACAO DO SEMAFORO
 // =========================
-const unsigned long LOW_LIGHT_BLINK_PERIOD_MS = 2000;
-const unsigned long LOW_LIGHT_BLINK_ON_TIME_MS = 250;
+const unsigned long GREEN_TIME_MS = 3000;
+const unsigned long YELLOW_TIME_MS = 1000;
+const unsigned long RED_TIME_MS = 4000;
+
+// Modo noturno: 1 piscada por segundo
+const unsigned long NIGHT_BLINK_PERIOD_MS = 1000;
+const unsigned long NIGHT_BLINK_ON_TIME_MS = 500;
 
 // =========================
 // VARIAVEIS GLOBAIS
 // =========================
-volatile bool sosInterruptFlag = false;
+volatile bool pedestrianInterruptFlag = false;
 volatile unsigned long lastInterruptUs = 0;
 
-unsigned long sosActiveUntilMs = 0;
+unsigned long pedestrianRedUntilMs = 0;
 unsigned long lastAdcReadMs = 0;
 unsigned long lastLinkPrintMs = 0;
 
@@ -77,39 +82,71 @@ int ldrRaw = 0;
 int ldrPercent = 0;
 bool lowLight = false;
 
-unsigned long sosCounter = 0;
+unsigned long pedestrianCounter = 0;
 String ledStatus = "desligado";
+String operationMode = "iniciando";
 
 bool usingSoftAP = false;
+bool normalCycleInitialized = false;
+
+uint8_t currentLedRed = 0;
+uint8_t currentLedGreen = 0;
+uint8_t currentLedBlue = 0;
+bool currentLedDefined = false;
+
+enum TrafficState {
+  TRAFFIC_GREEN,
+  TRAFFIC_YELLOW,
+  TRAFFIC_RED
+};
+
+TrafficState trafficState = TRAFFIC_GREEN;
+unsigned long trafficStateStartMs = 0;
 
 // =========================
 // FUNCOES DO LED BUILTIN NEOPIXEL
 // =========================
 void setBuiltinLed(uint8_t red, uint8_t green, uint8_t blue) {
+  if (currentLedDefined &&
+      currentLedRed == red &&
+      currentLedGreen == green &&
+      currentLedBlue == blue) {
+    return;
+  }
+
   led.setPixelColor(0, led.Color(red, green, blue));
   led.show();
+
+  currentLedRed = red;
+  currentLedGreen = green;
+  currentLedBlue = blue;
+  currentLedDefined = true;
 }
 
 void ledOff() {
   setBuiltinLed(0, 0, 0);
 }
 
-void ledRed() {
-  setBuiltinLed(255, 0, 0);
+void ledGreen() {
+  setBuiltinLed(0, 255, 0);
 }
 
 void ledYellow() {
   setBuiltinLed(255, 200, 0);
 }
 
+void ledRed() {
+  setBuiltinLed(255, 0, 0);
+}
+
 // =========================
-// INTERRUPCAO DO BOTAO SOS
+// INTERRUPCAO DO BOTAO DE TRAVESSIA
 // =========================
-void IRAM_ATTR handleSosInterrupt() {
+void IRAM_ATTR handlePedestrianInterrupt() {
   unsigned long nowUs = micros();
 
   if (nowUs - lastInterruptUs >= DEBOUNCE_TIME_US) {
-    sosInterruptFlag = true;
+    pedestrianInterruptFlag = true;
     lastInterruptUs = nowUs;
   }
 }
@@ -120,54 +157,103 @@ void IRAM_ATTR handleSosInterrupt() {
 void readLdr() {
   ldrRaw = analogRead(LDR_PIN);
 
-  // Como o ADC diminui quando ha mais luz, o percentual precisa ser invertido:
-  // ADC alto  -> pouca luz  -> percentual baixo
-  // ADC baixo -> muita luz   -> percentual alto
   ldrPercent = map(ldrRaw, ADC_MAX_VALUE, 0, 0, 100);
   ldrPercent = constrain(ldrPercent, 0, 100);
 
-  if (LOW_LIGHT_WHEN_ADC_BELOW_THRESHOLD) {
-    lowLight = ldrRaw < LOW_LIGHT_THRESHOLD;
+  lowLight = ldrPercent <= LOW_LIGHT_PERCENT_THRESHOLD;
+}
+
+// =========================
+// ESTADO DO BOTAO DE TRAVESSIA
+// =========================
+bool isPedestrianRequestActive() {
+  return millis() < pedestrianRedUntilMs;
+}
+
+// =========================
+// SEMAFORO NORMAL
+// =========================
+unsigned long getTrafficStateDuration(TrafficState state) {
+  switch (state) {
+    case TRAFFIC_GREEN:
+      return GREEN_TIME_MS;
+    case TRAFFIC_YELLOW:
+      return YELLOW_TIME_MS;
+    case TRAFFIC_RED:
+      return RED_TIME_MS;
+    default:
+      return GREEN_TIME_MS;
+  }
+}
+
+void goToNextTrafficState(unsigned long now) {
+  if (trafficState == TRAFFIC_GREEN) {
+    trafficState = TRAFFIC_YELLOW;
+  } else if (trafficState == TRAFFIC_YELLOW) {
+    trafficState = TRAFFIC_RED;
   } else {
-    lowLight = ldrRaw > LOW_LIGHT_THRESHOLD;
+    trafficState = TRAFFIC_GREEN;
+  }
+
+  trafficStateStartMs = now;
+}
+
+void updateNormalTrafficCycle(unsigned long now) {
+  if (!normalCycleInitialized) {
+    trafficState = TRAFFIC_GREEN;
+    trafficStateStartMs = now;
+    normalCycleInitialized = true;
+  }
+
+  if (now - trafficStateStartMs >= getTrafficStateDuration(trafficState)) {
+    goToNextTrafficState(now);
   }
 }
 
 // =========================
-// ESTADO DO SOS
+// ATUALIZACAO DO LED / MODOS DO SEMAFORO
 // =========================
-bool isSosActive() {
-  return millis() < sosActiveUntilMs;
-}
-
-// =========================
-// ATUALIZACAO DO LED
-// =========================
-void updateLed() {
+void updateTrafficLight() {
   unsigned long now = millis();
 
-  if (isSosActive()) {
+  if (isPedestrianRequestActive()) {
+    normalCycleInitialized = false;
     ledRed();
-    ledStatus = "vermelho - SOS ativo";
+    operationMode = "travessia de pedestres";
+    ledStatus = "vermelho - travessia solicitada";
     return;
   }
 
   if (lowLight) {
-    unsigned long phase = now % LOW_LIGHT_BLINK_PERIOD_MS;
+    normalCycleInitialized = false;
+    operationMode = "noturno";
 
-    if (phase < LOW_LIGHT_BLINK_ON_TIME_MS) {
+    unsigned long phase = now % NIGHT_BLINK_PERIOD_MS;
+
+    if (phase < NIGHT_BLINK_ON_TIME_MS) {
       ledYellow();
-      ledStatus = "amarelo piscando - baixa luminosidade";
+      ledStatus = "amarelo aceso - modo noturno";
     } else {
       ledOff();
-      ledStatus = "desligado entre piscadas - baixa luminosidade";
+      ledStatus = "amarelo apagado - modo noturno";
     }
 
     return;
   }
 
-  ledOff();
-  ledStatus = "desligado - luminosidade normal";
+  operationMode = "normal";
+  updateNormalTrafficCycle(now);
+
+  if (trafficState == TRAFFIC_GREEN) {
+    ledGreen();
+    ledStatus = "verde - fluxo liberado";
+  } else if (trafficState == TRAFFIC_YELLOW) {
+    ledYellow();
+    ledStatus = "amarelo - atencao";
+  } else {
+    ledRed();
+    ledStatus = "vermelho - pare";
+  }
 }
 
 // =========================
@@ -207,7 +293,12 @@ void printAccessLinks() {
 // =========================
 void startSoftAP() {
   WiFi.mode(WIFI_AP);
-  WiFi.softAP(AP_SSID, AP_PASSWORD);
+
+  if (strlen(AP_PASSWORD) == 0) {
+    WiFi.softAP(AP_SSID);
+  } else {
+    WiFi.softAP(AP_SSID, AP_PASSWORD);
+  }
 
   usingSoftAP = true;
 
@@ -266,7 +357,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Monitoramento LDR e SOS</title>
+  <title>Semaforo com LDR e Botao</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <style>
@@ -323,7 +414,7 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 </head>
 
 <body>
-  <h1>Sistema de Monitoramento Inteligente</h1>
+  <h1>Semaforo Inteligente com LDR</h1>
 
   <div class="card">
     <h2>Sensor LDR</h2>
@@ -338,17 +429,20 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
   </div>
 
   <div class="card">
-    <h2>Botao SOS</h2>
+    <h2>Botao de Travessia</h2>
     <p>Estado:</p>
-    <div class="status" id="sosStatus">---</div>
+    <div class="status" id="pedestrianStatus">---</div>
 
-    <p>Total de acionamentos:</p>
-    <div class="value" id="sosCounter">---</div>
+    <p>Total de solicitacoes:</p>
+    <div class="value" id="pedestrianCounter">---</div>
   </div>
 
   <div class="card">
-    <h2>LED BuiltIn</h2>
-    <p>Estado atual:</p>
+    <h2>Semaforo</h2>
+    <p>Modo:</p>
+    <div class="status" id="operationMode">---</div>
+
+    <p>LED BuiltIn:</p>
     <div class="status" id="ledStatus">---</div>
   </div>
 
@@ -365,23 +459,24 @@ const char HTML_PAGE[] PROGMEM = R"rawliteral(
 
         const lightStatus = document.getElementById('lightStatus');
         if (dados.lowLight) {
-          lightStatus.textContent = 'BAIXA LUMINOSIDADE';
+          lightStatus.textContent = 'BAIXA LUMINOSIDADE - MODO NOTURNO';
           lightStatus.className = 'status alerta';
         } else {
           lightStatus.textContent = 'Luminosidade normal';
           lightStatus.className = 'status normal';
         }
 
-        const sosStatus = document.getElementById('sosStatus');
-        if (dados.sosActive) {
-          sosStatus.textContent = 'SOS ATIVO';
-          sosStatus.className = 'status sos';
+        const pedestrianStatus = document.getElementById('pedestrianStatus');
+        if (dados.pedestrianActive) {
+          pedestrianStatus.textContent = 'TRAVESSIA SOLICITADA';
+          pedestrianStatus.className = 'status sos';
         } else {
-          sosStatus.textContent = 'Inativo';
-          sosStatus.className = 'status normal';
+          pedestrianStatus.textContent = 'Inativo';
+          pedestrianStatus.className = 'status normal';
         }
 
-        document.getElementById('sosCounter').textContent = dados.sosCounter;
+        document.getElementById('pedestrianCounter').textContent = dados.pedestrianCounter;
+        document.getElementById('operationMode').textContent = dados.operationMode;
         document.getElementById('ledStatus').textContent = dados.ledStatus;
       } catch (erro) {
         console.log('Erro ao atualizar dados:', erro);
@@ -407,8 +502,9 @@ void handleDados() {
   json += "\"ldrRaw\":" + String(ldrRaw) + ",";
   json += "\"ldrPercent\":" + String(ldrPercent) + ",";
   json += "\"lowLight\":" + String(lowLight ? "true" : "false") + ",";
-  json += "\"sosActive\":" + String(isSosActive() ? "true" : "false") + ",";
-  json += "\"sosCounter\":" + String(sosCounter) + ",";
+  json += "\"pedestrianActive\":" + String(isPedestrianRequestActive() ? "true" : "false") + ",";
+  json += "\"pedestrianCounter\":" + String(pedestrianCounter) + ",";
+  json += "\"operationMode\":\"" + operationMode + "\",";
   json += "\"ledStatus\":\"" + ledStatus + "\"";
   json += "}";
 
@@ -423,12 +519,13 @@ void setup() {
   delay(1000);
 
   DEBUG_SERIAL.println();
-  DEBUG_SERIAL.println("--- Iniciando Monitoramento LDR + SOS ESP32-C3 REAL ---");
+  DEBUG_SERIAL.println("--- Iniciando Semaforo Inteligente com LDR e Botao ---");
   DEBUG_SERIAL.flush();
 
   pinMode(SOS_BUTTON_PIN, INPUT_PULLUP);
 
   led.begin();
+  led.setBrightness(80);
   ledOff();
 
   analogReadResolution(ADC_RESOLUTION_BITS);
@@ -436,7 +533,7 @@ void setup() {
 
   attachInterrupt(
     digitalPinToInterrupt(SOS_BUTTON_PIN),
-    handleSosInterrupt,
+    handlePedestrianInterrupt,
     FALLING
   );
 
@@ -462,23 +559,23 @@ void loop() {
 
   unsigned long now = millis();
 
-  if (sosInterruptFlag) {
+  if (pedestrianInterruptFlag) {
     noInterrupts();
-    sosInterruptFlag = false;
+    pedestrianInterruptFlag = false;
     interrupts();
 
-    sosCounter++;
-    sosActiveUntilMs = now + SOS_LED_TIME_MS;
+    pedestrianCounter++;
+    pedestrianRedUntilMs = now + PEDESTRIAN_RED_TIME_MS;
 
     DEBUG_SERIAL.println();
-    DEBUG_SERIAL.println("===== SOS ACIONADO =====");
-    DEBUG_SERIAL.println("Botao SOS detectado por interrupcao.");
+    DEBUG_SERIAL.println("===== TRAVESSIA SOLICITADA =====");
+    DEBUG_SERIAL.println("Botao de travessia detectado por interrupcao.");
     DEBUG_SERIAL.print("LED vermelho ativo por ");
-    DEBUG_SERIAL.print(SOS_LED_TIME_MS / 1000);
+    DEBUG_SERIAL.print(PEDESTRIAN_RED_TIME_MS / 1000);
     DEBUG_SERIAL.println(" segundos.");
-    DEBUG_SERIAL.print("Total de acionamentos: ");
-    DEBUG_SERIAL.println(sosCounter);
-    DEBUG_SERIAL.println("========================");
+    DEBUG_SERIAL.print("Total de solicitacoes: ");
+    DEBUG_SERIAL.println(pedestrianCounter);
+    DEBUG_SERIAL.println("================================");
     DEBUG_SERIAL.println();
     DEBUG_SERIAL.flush();
   }
@@ -492,10 +589,10 @@ void loop() {
     DEBUG_SERIAL.print(ldrRaw);
     DEBUG_SERIAL.print(" | Luminosidade: ");
     DEBUG_SERIAL.print(ldrPercent);
-    DEBUG_SERIAL.print("% | Baixa luminosidade: ");
+    DEBUG_SERIAL.print("% | Modo noturno: ");
     DEBUG_SERIAL.print(lowLight ? "SIM" : "NAO");
-    DEBUG_SERIAL.print(" | SOS ativo: ");
-    DEBUG_SERIAL.println(isSosActive() ? "SIM" : "NAO");
+    DEBUG_SERIAL.print(" | Travessia ativa: ");
+    DEBUG_SERIAL.println(isPedestrianRequestActive() ? "SIM" : "NAO");
     DEBUG_SERIAL.flush();
   }
 
@@ -504,5 +601,5 @@ void loop() {
     printAccessLinks();
   }
 
-  updateLed();
+  updateTrafficLight();
 }
