@@ -40,20 +40,25 @@ LIMITE_POSITIVO = (1 << (NUM_BITS - 1)) - 1
 #
 # Numeracao BCM do Raspberry Pi.
 #
+# Pinagem seguida do exemplo Freenove "Chapter 21 Matrix Keypad".
+#
 # Linhas:
-#   GPIO5  -> pino fisico 29
-#   GPIO6  -> pino fisico 31
-#   GPIO13 -> pino fisico 33
-#   GPIO19 -> pino fisico 35
+#   R1 -> GPIO16 -> pino fisico 36
+#   R2 -> GPIO20 -> pino fisico 38
+#   R3 -> GPIO21 -> pino fisico 40
+#   R4 -> GPIO26 -> pino fisico 37
 #
 # Colunas:
-#   GPIO12 -> pino fisico 32
-#   GPIO16 -> pino fisico 36
-#   GPIO20 -> pino fisico 38
-#   GPIO21 -> pino fisico 40
+#   C1 -> GPIO19 -> pino fisico 35
+#   C2 -> GPIO13 -> pino fisico 33
+#   C3 -> GPIO6  -> pino fisico 31
+#   C4 -> GPIO5  -> pino fisico 29
 
-ROW_PINS = [5, 6, 13, 19]
-COL_PINS = [12, 16, 20, 21]
+ROWS = 4
+COLS = 4
+ROW_PINS = [16, 20, 21, 26]
+COL_PINS = [19, 13, 6, 5]
+KEYPAD_DEBOUNCE_SECONDS = 0.05
 
 KEYMAP = [
     ["1", "2", "3", "A"],
@@ -75,7 +80,8 @@ OPERACOES = {
 # CONFIGURACAO DO LCD I2C
 # ==========================================================
 #
-# Enderecos comuns para o modulo PCF8574: 0x27 e 0x3F.
+# Interface seguida do exemplo Freenove "Chapter 19 LCD1602".
+# Enderecos comuns: PCF8574T = 0x27, PCF8574AT = 0x3F.
 # Caso o LCD nao responda, execute no Raspberry Pi:
 #   i2cdetect -y 1
 
@@ -87,6 +93,7 @@ LCD_ROWS = 2
 
 # Bits mais comuns do backpack PCF8574 para LCD HD44780.
 LCD_RS = 0x01
+LCD_RW = 0x02
 LCD_ENABLE = 0x04
 LCD_BACKLIGHT = 0x08
 
@@ -188,7 +195,7 @@ def calcular(operacao, valor_a, valor_b):
 
 
 # ==========================================================
-# DRIVER DO LCD I2C PCF8574
+# DRIVER DO LCD1602 I2C PCF8574
 # ==========================================================
 
 def abrir_barramento_i2c():
@@ -200,14 +207,13 @@ def abrir_barramento_i2c():
     return SMBus(I2C_BUS)
 
 
-class LcdI2c:
-    def __init__(self, bus, address, cols=16, rows=2):
+class Lcd1602I2c:
+    def __init__(self, bus, address=LCD_I2C_ADDRESS, cols=16, rows=2):
         self.bus = bus
         self.address = address
         self.cols = cols
         self.rows = rows
         self.backlight = LCD_BACKLIGHT
-        self.inicializar()
 
     def escrever_expansor(self, valor):
         self.bus.write_byte(self.address, valor | self.backlight)
@@ -238,7 +244,11 @@ class LcdI2c:
     def escrever_caractere(self, caractere):
         self.enviar(ord(caractere), LCD_RS)
 
-    def inicializar(self):
+    def init_lcd(self, addr=None, bl=1):
+        if addr is not None:
+            self.address = addr
+
+        self.backlight = LCD_BACKLIGHT if bl else 0
         sleep(0.05)
 
         self.enviar_4_bits(0x30)
@@ -252,10 +262,13 @@ class LcdI2c:
         self.comando(0x28)  # 4 bits, 2 linhas, matriz 5x8.
         self.comando(0x0C)  # Display ligado, cursor desligado.
         self.comando(0x06)  # Incrementa cursor.
-        self.limpar()
+        self.clear()
+
+    def clear(self):
+        self.comando(0x01)
 
     def limpar(self):
-        self.comando(0x01)
+        self.clear()
 
     def posicionar_cursor(self, coluna, linha):
         enderecos_linha = [0x00, 0x40, 0x14, 0x54]
@@ -263,16 +276,27 @@ class LcdI2c:
         coluna = max(0, min(coluna, self.cols - 1))
         self.comando(0x80 | (enderecos_linha[linha] + coluna))
 
-    def escrever_linha(self, linha, texto):
-        texto = texto[:self.cols].ljust(self.cols)
-        self.posicionar_cursor(0, linha)
+    def write(self, x, y, texto):
+        texto = str(texto)
+        x = max(0, min(x, self.cols - 1))
+        y = max(0, min(y, self.rows - 1))
+        espaco_disponivel = self.cols - x
 
-        for caractere in texto:
+        self.posicionar_cursor(x, y)
+
+        for caractere in texto[:espaco_disponivel]:
             self.escrever_caractere(caractere)
 
+    def display_num(self, x, y, numero):
+        self.write(x, y, str(numero))
+
+    def escrever_linha(self, linha, texto):
+        self.write(0, linha, str(texto)[:self.cols].ljust(self.cols))
+
     def mostrar(self, linha_0="", linha_1=""):
-        self.escrever_linha(0, linha_0)
-        self.escrever_linha(1, linha_1)
+        self.clear()
+        self.write(0, 0, linha_0)
+        self.write(0, 1, linha_1)
 
 
 # ==========================================================
@@ -280,13 +304,23 @@ class LcdI2c:
 # ==========================================================
 
 class TecladoMatricial:
-    def __init__(self, row_pins, col_pins, keymap):
+    def __init__(self, row_pins, col_pins, keymap, rows=ROWS, cols=COLS):
         import RPi.GPIO as GPIO
 
         self.GPIO = GPIO
         self.row_pins = row_pins
         self.col_pins = col_pins
         self.keymap = keymap
+        self.rows = rows
+        self.cols = cols
+
+        if len(self.row_pins) != self.rows or len(self.col_pins) != self.cols:
+            raise ValueError("Pinagem do teclado nao confere com ROWS/COLS.")
+
+        if len(self.keymap) != self.rows or any(
+            len(linha) != self.cols for linha in self.keymap
+        ):
+            raise ValueError("Mapa de teclas nao confere com ROWS/COLS.")
 
         GPIO.setwarnings(False)
         GPIO.setmode(GPIO.BCM)
@@ -317,13 +351,13 @@ class TecladoMatricial:
             tecla = self.ler_varredura()
 
             if tecla is not None:
-                sleep(0.04)
+                sleep(KEYPAD_DEBOUNCE_SECONDS)
 
                 if self.ler_varredura() == tecla:
                     while self.ler_varredura() is not None:
                         sleep(0.01)
 
-                    sleep(0.04)
+                    sleep(KEYPAD_DEBOUNCE_SECONDS)
                     return tecla
 
             sleep(0.01)
@@ -488,7 +522,8 @@ def main():
 
     try:
         bus = abrir_barramento_i2c()
-        lcd = LcdI2c(bus, LCD_I2C_ADDRESS, LCD_COLS, LCD_ROWS)
+        lcd = Lcd1602I2c(bus, cols=LCD_COLS, rows=LCD_ROWS)
+        lcd.init_lcd(LCD_I2C_ADDRESS)
         teclado = TecladoMatricial(ROW_PINS, COL_PINS, KEYMAP)
         app = CalculadoraStandalone(lcd, teclado)
         app.executar()
