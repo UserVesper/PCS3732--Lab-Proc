@@ -14,6 +14,8 @@ Representacao:
   - Intervalo representavel: -8 ate +7.
 """
 
+from time import perf_counter_ns
+
 NUM_BITS = 4
 MODULO = 1 << NUM_BITS
 MASCARA = MODULO - 1
@@ -135,6 +137,7 @@ def imprimir_resultado(
     operando_b_binario,
     valor_b,
     resultado,
+    tempo_operacao_ns,
     resto=None,
 ):
     resultado_binario = inteiro_para_binario_4_bits(resultado)
@@ -157,6 +160,12 @@ def imprimir_resultado(
         f"{binario_para_inteiro_com_sinal(resultado_binario)}"
     )
     print(f"Overflow em 4 bits: {'SIM' if overflow else 'NAO'}")
+    print(
+        "Tempo para realizar a operacao: "
+        f"{tempo_operacao_ns} ns "
+        f"({tempo_operacao_ns / 1000:.3f} us | "
+        f"{tempo_operacao_ns / 1_000_000:.6f} ms)"
+    )
 
     if resto is not None:
         resto_binario = inteiro_para_binario_4_bits(resto)
@@ -176,6 +185,8 @@ def executar_operacao(operacao):
     if operacao != "!":
         operando_b_binario, valor_b = ler_operando("B")
 
+    inicio_operacao_ns = perf_counter_ns()
+
     if operacao == "+":
         resultado = valor_a + valor_b
     elif operacao == "-":
@@ -189,6 +200,8 @@ def executar_operacao(operacao):
     else:
         raise ValueError("Operacao invalida.")
 
+    tempo_operacao_ns = perf_counter_ns() - inicio_operacao_ns
+
     imprimir_resultado(
         operacao,
         operando_a_binario,
@@ -196,6 +209,7 @@ def executar_operacao(operacao):
         operando_b_binario,
         valor_b,
         resultado,
+        tempo_operacao_ns,
         resto,
     )
 
