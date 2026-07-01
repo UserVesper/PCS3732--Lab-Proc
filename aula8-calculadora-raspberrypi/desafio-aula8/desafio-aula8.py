@@ -8,10 +8,10 @@ Hardware esperado:
   - Display LCD 16x2 com adaptador I2C PCF8574.
 
 Uso:
-  - A: soma
-  - B: subtracao
-  - C: multiplicacao
-  - D: divisao
+  - 1: soma
+  - 2: subtracao
+  - 3: multiplicacao
+  - 4: divisao
   - *: fatorial
   - 0 e 1: bits dos operandos
   - #: limpa/reinicia a operacao atual
@@ -68,10 +68,10 @@ KEYMAP = [
 ]
 
 OPERACOES = {
-    "A": "+",
-    "B": "-",
-    "C": "*",
-    "D": "/",
+    "1": "+",
+    "2": "-",
+    "3": "*",
+    "4": "/",
     "*": "!",
 }
 
@@ -383,7 +383,7 @@ class CalculadoraStandalone:
         self.estado = "operacao"
 
     def mostrar_inicio(self):
-        self.lcd.mostrar("A:+ B:- C:* D:/", "*:fat #:limpa")
+        self.lcd.mostrar("1:+ 2:- 3:* 4:/", "*:fat #:limpa")
 
     def mostrar_entrada(self):
         if self.estado == "operando_a":
@@ -411,7 +411,7 @@ class CalculadoraStandalone:
 
     def selecionar_operacao(self, tecla):
         if tecla not in OPERACOES:
-            self.mostrar_erro("Tecla invalida", "Use A/B/C/D/*")
+            self.mostrar_erro("Tecla invalida", "Use 1-4 ou *")
             return
 
         self.operacao = OPERACOES[tecla]
