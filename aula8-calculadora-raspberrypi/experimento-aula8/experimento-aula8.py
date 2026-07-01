@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Calculadora binaria de 4 bits para Raspberry Pi 3.
+Calculadora binaria para Raspberry Pi 3.
 
 Entradas:
   - Teclado conectado ao Raspberry Pi.
@@ -10,20 +10,26 @@ Saidas:
   - Terminal exibido no monitor conectado via HDMI/VGA.
 
 Representacao:
-  - Entradas e saidas possuem 4 bits em complemento de 2.
-  - Intervalo representavel: -8 ate +7.
+  - Entradas e saidas usam NUM_BITS bits em complemento de 2.
+  - O intervalo representavel e calculado a partir de NUM_BITS.
 """
 
 from time import perf_counter_ns
 
 NUM_BITS = 4
+
+if NUM_BITS < 1:
+    raise ValueError("NUM_BITS deve ser maior ou igual a 1.")
+
 MODULO = 1 << NUM_BITS
 MASCARA = MODULO - 1
 LIMITE_NEGATIVO = -(1 << (NUM_BITS - 1))
 LIMITE_POSITIVO = (1 << (NUM_BITS - 1)) - 1
+FORMATO_BINARIO = f"0{NUM_BITS}b"
+UNIDADE_BITS = "bit" if NUM_BITS == 1 else "bits"
 
 
-def eh_binario_4_bits(valor):
+def eh_binario(valor):
     return len(valor) == NUM_BITS and all(bit in "01" for bit in valor)
 
 
@@ -37,8 +43,8 @@ def binario_para_inteiro_com_sinal(valor_binario):
     return valor_sem_sinal
 
 
-def inteiro_para_binario_4_bits(valor):
-    return format(valor & MASCARA, "04b")
+def inteiro_para_binario(valor):
+    return format(valor & MASCARA, FORMATO_BINARIO)
 
 
 def ocorreu_overflow(valor):
@@ -102,12 +108,18 @@ def fatorial(valor):
 
 def ler_operando(nome):
     while True:
-        valor = input(f"Digite o operando {nome} em 4 bits: ").strip()
+        valor = input(
+            f"Digite o operando {nome} em {NUM_BITS} {UNIDADE_BITS}: "
+        ).strip()
 
-        if eh_binario_4_bits(valor):
+        if eh_binario(valor):
             return valor, binario_para_inteiro_com_sinal(valor)
 
-        print("Entrada invalida. Use exatamente 4 bits, por exemplo: 0011.")
+        exemplo = inteiro_para_binario(min(3, LIMITE_POSITIVO))
+        print(
+            "Entrada invalida. Use exatamente "
+            f"{NUM_BITS} {UNIDADE_BITS}, por exemplo: {exemplo}."
+        )
 
 
 def ler_operacao():
@@ -125,8 +137,8 @@ def ler_operacao():
 
 def imprimir_cabecalho():
     print("=" * 60)
-    print("Calculadora binaria de 4 bits - Raspberry Pi 3")
-    print("Complemento de 2 | intervalo: -8 ate +7")
+    print(f"Calculadora binaria de {NUM_BITS} {UNIDADE_BITS} - Raspberry Pi 3")
+    print(f"Complemento de 2 | intervalo: {LIMITE_NEGATIVO} ate {LIMITE_POSITIVO}")
     print("=" * 60)
 
 
@@ -140,7 +152,7 @@ def imprimir_resultado(
     tempo_operacao_ns,
     resto=None,
 ):
-    resultado_binario = inteiro_para_binario_4_bits(resultado)
+    resultado_binario = inteiro_para_binario(resultado)
     overflow = ocorreu_overflow(resultado)
 
     print()
@@ -154,12 +166,12 @@ def imprimir_resultado(
         print(f"B: {operando_b_binario} = {valor_b}")
 
     print(f"Resultado decimal completo: {resultado}")
-    print(f"Resultado em 4 bits: {resultado_binario}")
+    print(f"Resultado em {NUM_BITS} {UNIDADE_BITS}: {resultado_binario}")
     print(
         "Resultado interpretado em complemento de 2: "
         f"{binario_para_inteiro_com_sinal(resultado_binario)}"
     )
-    print(f"Overflow em 4 bits: {'SIM' if overflow else 'NAO'}")
+    print(f"Overflow em {NUM_BITS} {UNIDADE_BITS}: {'SIM' if overflow else 'NAO'}")
     print(
         "Tempo para realizar a operacao: "
         f"{tempo_operacao_ns} ns "
@@ -168,9 +180,9 @@ def imprimir_resultado(
     )
 
     if resto is not None:
-        resto_binario = inteiro_para_binario_4_bits(resto)
+        resto_binario = inteiro_para_binario(resto)
         print(f"Resto decimal: {resto}")
-        print(f"Resto em 4 bits: {resto_binario}")
+        print(f"Resto em {NUM_BITS} {UNIDADE_BITS}: {resto_binario}")
 
     print("-" * 60)
     print()
@@ -178,7 +190,7 @@ def imprimir_resultado(
 
 def executar_operacao(operacao):
     operando_a_binario, valor_a = ler_operando("A")
-    operando_b_binario = "0000"
+    operando_b_binario = inteiro_para_binario(0)
     valor_b = 0
     resto = None
 
