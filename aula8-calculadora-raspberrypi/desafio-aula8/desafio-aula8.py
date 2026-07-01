@@ -20,6 +20,8 @@ As entradas e a saida principal possuem 4 bits em complemento de 2.
 Intervalo representavel: -8 ate +7.
 """
 
+import sys
+from pathlib import Path
 from time import sleep
 
 
@@ -305,9 +307,6 @@ class Lcd1602I2c:
 
 class TecladoMatricial:
     def __init__(self, row_pins, col_pins, keymap, rows=ROWS, cols=COLS):
-        import RPi.GPIO as GPIO
-
-        self.GPIO = GPIO
         self.row_pins = row_pins
         self.col_pins = col_pins
         self.keymap = keymap
@@ -322,48 +321,33 @@ class TecladoMatricial:
         ):
             raise ValueError("Mapa de teclas nao confere com ROWS/COLS.")
 
-        GPIO.setwarnings(False)
-        GPIO.setmode(GPIO.BCM)
+        pasta_teclado = Path(__file__).resolve().parents[1] / "teste-teclado"
+        sys.path.insert(0, str(pasta_teclado))
 
-        for pin in self.row_pins:
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, GPIO.HIGH)
+        import Keypad
 
-        for pin in self.col_pins:
-            GPIO.setup(pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-
-    def ler_varredura(self):
-        for row_index, row_pin in enumerate(self.row_pins):
-            self.GPIO.output(row_pin, self.GPIO.LOW)
-            sleep(0.001)
-
-            for col_index, col_pin in enumerate(self.col_pins):
-                if self.GPIO.input(col_pin) == self.GPIO.LOW:
-                    self.GPIO.output(row_pin, self.GPIO.HIGH)
-                    return self.keymap[row_index][col_index]
-
-            self.GPIO.output(row_pin, self.GPIO.HIGH)
-
-        return None
+        teclas = [tecla for linha in self.keymap for tecla in linha]
+        self.NULL = Keypad.Keypad.NULL
+        self.keypad = Keypad.Keypad(
+            teclas,
+            self.row_pins,
+            self.col_pins,
+            self.rows,
+            self.cols,
+        )
+        self.keypad.setDebounceTime(int(KEYPAD_DEBOUNCE_SECONDS * 1000))
 
     def aguardar_tecla(self):
         while True:
-            tecla = self.ler_varredura()
+            tecla = self.keypad.getKey()
 
-            if tecla is not None:
-                sleep(KEYPAD_DEBOUNCE_SECONDS)
-
-                if self.ler_varredura() == tecla:
-                    while self.ler_varredura() is not None:
-                        sleep(0.01)
-
-                    sleep(KEYPAD_DEBOUNCE_SECONDS)
-                    return tecla
+            if tecla != self.NULL:
+                return tecla
 
             sleep(0.01)
 
     def limpar(self):
-        self.GPIO.cleanup()
+        pass
 
 
 # ==========================================================
