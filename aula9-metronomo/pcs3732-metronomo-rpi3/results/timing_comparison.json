@@ -1,0 +1,18 @@
+{
+  "environment": "Linux de desenvolvimento; não representa medição física no Raspberry Pi 3",
+  "cycles": 80,
+  "period_ms": 30.0,
+  "work_ms": 2.0,
+  "naive": {
+    "mean_ms": 111.25773763750001,
+    "stdev_ms": 63.57074675235013,
+    "max_ms": 219.387072,
+    "final_ms": 219.387072
+  },
+  "absolute": {
+    "mean_ms": 0.40213093750000006,
+    "stdev_ms": 0.3587583588292524,
+    "max_ms": 1.534577,
+    "final_ms": 0.002322
+  }
+}
