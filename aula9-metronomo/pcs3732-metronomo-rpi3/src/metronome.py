@@ -1,24 +1,38 @@
 #!/usr/bin/env python3
-"""Metrônomo para Raspberry Pi 3 usando pigpio.
+"""Metrônomo para Raspberry Pi 3 com Freenove Projects Board v1.2.
 
-Projeto acadêmico: LED por PWM, servomotor, buzzer, botões físicos e
-agendamento periódico com prazos absolutos baseados em CLOCK_MONOTONIC.
+Biblioteca de GPIO: gpiozero (não utiliza pigpio nem o daemon pigpiod).
 
-O módulo também possui um backend simulado (``--dry-run``), permitindo
-validar a lógica sem acesso ao hardware.
+Mapeamento BCM da placa Freenove usado neste programa:
+    LED azul integrado ............... GPIO17
+    Servo (pino SIG do conector) ..... GPIO18
+    Buzzer ativo integrado ........... GPIO12
+    Buzzer passivo integrado ......... GPIO4  (opção --passive-buzzer)
+    Botão S1 / BPM + ................. GPIO21
+    Botão S2 / BPM - ................. GPIO20
+    Botão S3 / liga/desliga buzzer ... GPIO16
+    Botão S4 ......................... GPIO26 (não utilizado)
+
+Antes de executar, ajuste as chaves físicas da placa:
+    - função 2 (Button): quatro chaves ligadas;
+    - função 5 (Blue LED): ligada;
+    - função 3 (Active Buzzer): ligada, quando usar o buzzer ativo.
+
+Restrições da placa:
+    - buzzer ativo e relé não devem ser usados simultaneamente;
+    - servo e WS2812 LED não devem ser usados simultaneamente.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import queue
 import signal
 import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional, Protocol
@@ -44,28 +58,40 @@ class RealClock:
 
 @dataclass(slots=True)
 class Config:
+    # Parâmetros do metrônomo
     bpm: int = 60
     min_bpm: int = 30
     max_bpm: int = 240
     bpm_step: int = 5
     pulse_ms: int = 70
+
+    # PWM e atuadores
     led_frequency_hz: int = 1000
     buzzer_frequency_hz: int = 2000
     passive_buzzer: bool = False
     buzzer_enabled: bool = True
+
+    # Movimento pendular. A faixa é propositalmente conservadora.
     servo_left_deg: float = -35.0
     servo_right_deg: float = 35.0
-    servo_min_pulse_us: int = 1000
-    servo_max_pulse_us: int = 2000
+    servo_min_pulse_s: float = 1.0 / 1000.0
+    servo_max_pulse_s: float = 2.0 / 1000.0
     servo_min_angle: float = -90.0
     servo_max_angle: float = 90.0
-    led_gpio: int = 18
-    servo_gpio: int = 17
-    buzzer_gpio: int = 27
-    button_up_gpio: int = 22
-    button_down_gpio: int = 23
-    button_toggle_gpio: int = 24
-    debounce_us: int = 50_000
+
+    # Freenove Projects Board for Raspberry Pi v1.2 — numeração BCM
+    led_gpio: int = 17
+    servo_gpio: int = 18
+    active_buzzer_gpio: int = 12
+    passive_buzzer_gpio: int = 4
+    button_up_gpio: int = 21       # S1
+    button_down_gpio: int = 20     # S2
+    button_toggle_gpio: int = 16   # S3
+    unused_button_gpio: int = 26   # S4
+
+    # Debounce realizado pelo gpiozero
+    debounce_seconds: float = 0.20
+
     state_file: str = "/var/lib/rpi3-metronomo/state.json"
     timing_csv: str = "/var/log/rpi3-metronomo/timing.csv"
 
@@ -120,96 +146,156 @@ class HardwareBackend(Protocol):
     def close(self) -> None: ...
 
 
-class PigpioBackend:
-    """Backend real. O daemon ``pigpiod`` deve estar ativo."""
+class GPIOZeroBackend:
+    """Backend real baseado exclusivamente em gpiozero.
+
+    O gpiozero seleciona automaticamente um pin factory disponível no
+    Raspberry Pi OS, normalmente lgpio ou RPi.GPIO. Não é necessário iniciar
+    o pigpiod.
+    """
 
     def __init__(self, config: Config):
         try:
-            import pigpio  # type: ignore
+            from gpiozero import AngularServo, Button, Buzzer, PWMLED, PWMOutputDevice
         except ImportError as exc:
             raise RuntimeError(
-                "Módulo pigpio ausente. Instale: sudo apt install pigpio python3-pigpio"
+                "Biblioteca gpiozero ausente. Instale com: "
+                "sudo apt install python3-gpiozero python3-lgpio"
             ) from exc
 
-        self._pigpio = pigpio
         self._config = config
-        self._pi = pigpio.pi()
-        if not self._pi.connected:
-            raise RuntimeError("Não foi possível conectar ao pigpiod. Execute: sudo systemctl enable --now pigpiod")
+        self._lock = threading.RLock()
+        self._closed = False
+        self._buttons: list[object] = []
 
-        self._callbacks = []
-        self._pi.set_mode(config.led_gpio, pigpio.OUTPUT)
-        self._pi.set_mode(config.servo_gpio, pigpio.OUTPUT)
-        self._pi.set_mode(config.buzzer_gpio, pigpio.OUTPUT)
-        self._pi.write(config.buzzer_gpio, 0)
-        self._pi.set_servo_pulsewidth(config.servo_gpio, 0)
-        self.set_led(0.0)
+        try:
+            self._led = PWMLED(
+                config.led_gpio,
+                initial_value=0.0,
+                frequency=config.led_frequency_hz,
+            )
+
+            self._servo = AngularServo(
+                config.servo_gpio,
+                initial_angle=0.0,
+                min_angle=config.servo_min_angle,
+                max_angle=config.servo_max_angle,
+                min_pulse_width=config.servo_min_pulse_s,
+                max_pulse_width=config.servo_max_pulse_s,
+                frame_width=20.0 / 1000.0,  # 50 Hz
+            )
+
+            if config.passive_buzzer:
+                self._buzzer = PWMOutputDevice(
+                    config.passive_buzzer_gpio,
+                    active_high=True,
+                    initial_value=0.0,
+                    frequency=config.buzzer_frequency_hz,
+                )
+            else:
+                self._buzzer = Buzzer(
+                    config.active_buzzer_gpio,
+                    active_high=True,
+                    initial_value=False,
+                )
+
+            self._Button = Button
+        except Exception as exc:
+            # Libera dispositivos que eventualmente tenham sido criados antes
+            # da falha de inicialização.
+            for name in ("_buzzer", "_servo", "_led"):
+                device = getattr(self, name, None)
+                if device is not None:
+                    try:
+                        device.close()
+                    except Exception:
+                        pass
+            raise RuntimeError(
+                "Falha ao inicializar as GPIOs com gpiozero. Verifique a "
+                "conexão da placa, permissões e a instalação de python3-lgpio. "
+                f"Detalhe: {exc}"
+            ) from exc
 
     def set_led(self, value: float) -> None:
-        value = max(0.0, min(1.0, float(value)))
-        duty = int(round(value * 1_000_000))
-        # GPIO18 expõe PWM0 por hardware no RPi3. Para outro GPIO, usa PWM
-        # amostrado por DMA do pigpio.
-        if self._config.led_gpio in (12, 13, 18, 19):
-            rc = self._pi.hardware_PWM(
-                self._config.led_gpio,
-                self._config.led_frequency_hz,
-                duty,
-            )
-            if rc < 0:
-                raise RuntimeError(f"hardware_PWM falhou: código {rc}")
-        else:
-            self._pi.set_PWM_frequency(self._config.led_gpio, self._config.led_frequency_hz)
-            self._pi.set_PWM_range(self._config.led_gpio, 255)
-            self._pi.set_PWM_dutycycle(self._config.led_gpio, round(value * 255))
+        with self._lock:
+            if self._closed:
+                return
+            self._led.value = max(0.0, min(1.0, float(value)))
 
     def set_servo_angle(self, angle_deg: float) -> None:
         cfg = self._config
         angle = max(cfg.servo_min_angle, min(cfg.servo_max_angle, float(angle_deg)))
-        fraction = (angle - cfg.servo_min_angle) / (cfg.servo_max_angle - cfg.servo_min_angle)
-        pulse = round(cfg.servo_min_pulse_us + fraction * (cfg.servo_max_pulse_us - cfg.servo_min_pulse_us))
-        rc = self._pi.set_servo_pulsewidth(cfg.servo_gpio, pulse)
-        if rc < 0:
-            raise RuntimeError(f"set_servo_pulsewidth falhou: código {rc}")
+        with self._lock:
+            if self._closed:
+                return
+            self._servo.angle = angle
 
     def buzzer_on(self) -> None:
-        cfg = self._config
-        if cfg.passive_buzzer:
-            self._pi.set_PWM_frequency(cfg.buzzer_gpio, cfg.buzzer_frequency_hz)
-            self._pi.set_PWM_range(cfg.buzzer_gpio, 255)
-            self._pi.set_PWM_dutycycle(cfg.buzzer_gpio, 128)
-        else:
-            self._pi.write(cfg.buzzer_gpio, 1)
+        with self._lock:
+            if self._closed:
+                return
+            if self._config.passive_buzzer:
+                # O buzzer passivo precisa de uma onda quadrada audível.
+                self._buzzer.value = 0.5
+            else:
+                self._buzzer.on()
 
     def buzzer_off(self) -> None:
-        cfg = self._config
-        if cfg.passive_buzzer:
-            self._pi.set_PWM_dutycycle(cfg.buzzer_gpio, 0)
-        else:
-            self._pi.write(cfg.buzzer_gpio, 0)
+        with self._lock:
+            if self._closed:
+                return
+            if self._config.passive_buzzer:
+                self._buzzer.value = 0.0
+            else:
+                self._buzzer.off()
 
     def register_button(self, gpio: int, callback: Callable[[], None]) -> None:
-        p = self._pigpio
-        self._pi.set_mode(gpio, p.INPUT)
-        self._pi.set_pull_up_down(gpio, p.PUD_UP)
-        self._pi.set_glitch_filter(gpio, self._config.debounce_us)
-
-        def _wrapper(_gpio: int, level: int, _tick: int) -> None:
-            if level == 0:  # borda de descida, botão ligado ao GND
-                callback()
-
-        cb = self._pi.callback(gpio, p.FALLING_EDGE, _wrapper)
-        self._callbacks.append(cb)
+        # Os botões da placa são ativos em nível baixo. O pull-up interno deixa
+        # a entrada em nível alto quando o botão está solto.
+        button = self._Button(
+            gpio,
+            pull_up=True,
+            bounce_time=self._config.debounce_seconds,
+        )
+        button.when_pressed = callback
+        self._buttons.append(button)
 
     def close(self) -> None:
-        for cb in self._callbacks:
-            cb.cancel()
-        try:
-            self.buzzer_off()
-            self.set_led(0.0)
-            self._pi.set_servo_pulsewidth(self._config.servo_gpio, 0)
-        finally:
-            self._pi.stop()
+        with self._lock:
+            if self._closed:
+                return
+
+            # Primeiro desativa as callbacks para impedir novas alterações de
+            # estado durante o encerramento.
+            for button in self._buttons:
+                try:
+                    button.when_pressed = None
+                except Exception:
+                    pass
+
+            try:
+                if self._config.passive_buzzer:
+                    self._buzzer.value = 0.0
+                else:
+                    self._buzzer.off()
+                self._led.value = 0.0
+                # Remove o trem PWM do servo antes de fechar o dispositivo.
+                try:
+                    self._servo.detach()
+                except (AttributeError, RuntimeError):
+                    pass
+            finally:
+                for button in self._buttons:
+                    try:
+                        button.close()
+                    except Exception:
+                        pass
+                for device in (self._buzzer, self._servo, self._led):
+                    try:
+                        device.close()
+                    except Exception:
+                        pass
+                self._closed = True
 
 
 class MockBackend:
@@ -243,6 +329,8 @@ class MockBackend:
         self.buttons[gpio]()
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.closed = True
         self._record("backend", "closed")
 
@@ -260,26 +348,38 @@ class TimingLogger:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             with self._lock:
                 mode = "a" if self._initialized or self.path.exists() else "w"
-                with self.path.open(mode, encoding="utf-8") as f:
+                with self.path.open(mode, encoding="utf-8") as file:
                     if mode == "w":
-                        f.write("beat,scheduled_ns,actual_ns,error_us,bpm\n")
+                        file.write("beat,scheduled_ns,actual_ns,error_us,bpm\n")
                     error_us = (actual_ns - scheduled_ns) / 1000.0
-                    f.write(f"{beat},{scheduled_ns},{actual_ns},{error_us:.3f},{bpm}\n")
+                    file.write(
+                        f"{beat},{scheduled_ns},{actual_ns},{error_us:.3f},{bpm}\n"
+                    )
                 self._initialized = True
         except OSError as exc:
             print(f"Aviso: não foi possível registrar temporização: {exc}")
 
 
 class ActuatorWorker:
-    """Executa a atuação sem bloquear o laço de temporização."""
+    """Executa LED, servo e buzzer sem bloquear o agendador."""
 
-    def __init__(self, hardware: HardwareBackend, state: TempoState, config: Config, clock: Clock):
+    def __init__(
+        self,
+        hardware: HardwareBackend,
+        state: TempoState,
+        config: Config,
+        clock: Clock,
+    ):
         self.hardware = hardware
         self.state = state
         self.config = config
         self.clock = clock
         self._queue: queue.Queue[int | None] = queue.Queue(maxsize=4)
-        self._thread = threading.Thread(target=self._run, name="actuators", daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            name="actuators",
+            daemon=True,
+        )
         self._running = threading.Event()
         self._started = False
         self.dropped_beats = 0
@@ -296,20 +396,29 @@ class ActuatorWorker:
             self._queue.put_nowait(beat_number)
         except queue.Full:
             self.dropped_beats += 1
+            print("Aviso: atuação descartada porque a fila está cheia")
 
     def _run(self) -> None:
         while self._running.is_set():
             item = self._queue.get()
             if item is None:
                 break
+
             _, buzzer_enabled = self.state.snapshot()
-            angle = self.config.servo_left_deg if item % 2 else self.config.servo_right_deg
+            angle = (
+                self.config.servo_left_deg
+                if item % 2
+                else self.config.servo_right_deg
+            )
+
             self.hardware.set_servo_angle(angle)
             self.hardware.set_led(1.0)
             if buzzer_enabled:
                 self.hardware.buzzer_on()
+
             self.clock.sleep(self.config.pulse_ms / 1000.0)
-            self.hardware.set_led(0.12)  # brilho de repouso
+
+            self.hardware.set_led(0.12)
             if buzzer_enabled:
                 self.hardware.buzzer_off()
 
@@ -320,7 +429,6 @@ class ActuatorWorker:
         try:
             self._queue.put_nowait(None)
         except queue.Full:
-            # Descarta um evento antigo para garantir o encerramento.
             try:
                 self._queue.get_nowait()
             except queue.Empty:
@@ -330,7 +438,7 @@ class ActuatorWorker:
 
 
 class BeatScheduler:
-    """Agendador periódico com prazos absolutos, evitando drift acumulado."""
+    """Agendador periódico por deadlines absolutos, sem drift acumulado."""
 
     def __init__(
         self,
@@ -354,48 +462,58 @@ class BeatScheduler:
             if remaining <= 0:
                 return
             if remaining > self.busy_wait_ns:
-                sleep_ns = remaining - self.busy_wait_ns
-                self.clock.sleep(sleep_ns / 1_000_000_000)
+                self.clock.sleep((remaining - self.busy_wait_ns) / 1_000_000_000)
             elif self.busy_wait_ns == 0:
                 self.clock.sleep(remaining / 1_000_000_000)
             else:
-                # Espera ativa curta para reduzir o overshoot do escalonador.
+                # Espera ativa curta para reduzir o atraso de despertar.
                 pass
 
     def run(self, max_beats: int | None = None) -> None:
         beat = 0
         deadline = self.clock.monotonic_ns()
-        while not self.stop_event.is_set() and (max_beats is None or beat < max_beats):
+
+        while not self.stop_event.is_set() and (
+            max_beats is None or beat < max_beats
+        ):
             bpm, _ = self.state.snapshot()
             period_ns = self.period_override_ns or round(60_000_000_000 / bpm)
+
             if beat == 0:
                 deadline = self.clock.monotonic_ns()
             else:
                 deadline += period_ns
                 self._wait_until(deadline)
+
+            if self.stop_event.is_set():
+                break
+
             actual = self.clock.monotonic_ns()
             beat += 1
             self.on_beat(beat, deadline, actual, bpm)
 
-            # Caso o processo tenha atrasado mais que um período, evita rajada de
-            # eventos atrasados e reinicia a fase a partir do instante atual.
+            # Caso a aplicação atrase mais de um período, reinicia a fase para
+            # evitar uma rajada de batidas antigas.
             if actual - deadline > period_ns:
                 deadline = actual
 
 
 def atomic_save_json(path: str | Path, data: dict[str, object]) -> None:
-    """Grava JSON por arquivo temporário + fsync + replace atômico."""
+    """Grava JSON por arquivo temporário, fsync e substituição atômica."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
     tmp = Path(tmp_name)
+
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-            f.flush()
-            os.fsync(f.fileno())
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+
         os.replace(tmp, target)
+
         try:
             dir_fd = os.open(target.parent, os.O_DIRECTORY)
             try:
@@ -427,7 +545,7 @@ def configure_process(rt_priority: int | None, cpu_core: int | None) -> None:
             print(f"Aviso: não foi possível fixar afinidade na CPU {cpu_core}: {exc}")
 
     if rt_priority is not None:
-        if not (1 <= rt_priority <= 99):
+        if not 1 <= rt_priority <= 99:
             raise ValueError("rt_priority deve estar entre 1 e 99")
         try:
             os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(rt_priority))
@@ -438,7 +556,11 @@ def configure_process(rt_priority: int | None, cpu_core: int | None) -> None:
 def wait_for_wall_time(iso_datetime: str, clock: Clock) -> None:
     target = datetime.fromisoformat(iso_datetime)
     if target.tzinfo is None:
-        raise ValueError("--start-at exige fuso horário, por exemplo 2026-07-15T20:00:00-03:00")
+        raise ValueError(
+            "--start-at exige fuso horário, por exemplo "
+            "2026-07-15T20:00:00-03:00"
+        )
+
     target_ns = int(target.timestamp() * 1_000_000_000)
     while True:
         remaining = target_ns - clock.wall_time_ns()
@@ -448,7 +570,12 @@ def wait_for_wall_time(iso_datetime: str, clock: Clock) -> None:
 
 
 class MetronomeApp:
-    def __init__(self, config: Config, hardware: HardwareBackend, clock: Clock | None = None):
+    def __init__(
+        self,
+        config: Config,
+        hardware: HardwareBackend,
+        clock: Clock | None = None,
+    ):
         self.config = config
         self.clock = clock or RealClock()
         self.hardware = hardware
@@ -456,7 +583,12 @@ class MetronomeApp:
         self.stop_event = threading.Event()
         self.logger = TimingLogger(config.timing_csv)
         self.worker = ActuatorWorker(hardware, self.state, config, self.clock)
-        self.scheduler = BeatScheduler(self.state, self._on_beat, self.stop_event, self.clock)
+        self.scheduler = BeatScheduler(
+            self.state,
+            self._on_beat,
+            self.stop_event,
+            self.clock,
+        )
         self._stopped = False
 
     def _persist(self) -> None:
@@ -468,19 +600,28 @@ class MetronomeApp:
     def _on_up(self) -> None:
         bpm = self.state.increase()
         self._persist()
-        print(f"BPM alterado para {bpm}")
+        print(f"S1: BPM alterado para {bpm}")
 
     def _on_down(self) -> None:
         bpm = self.state.decrease()
         self._persist()
-        print(f"BPM alterado para {bpm}")
+        print(f"S2: BPM alterado para {bpm}")
 
     def _on_toggle(self) -> None:
         enabled = self.state.toggle_buzzer()
+        if not enabled:
+            # Desliga imediatamente; não espera o fim do pulso corrente.
+            self.hardware.buzzer_off()
         self._persist()
-        print(f"Buzzer {'ativado' if enabled else 'desativado'}")
+        print(f"S3: buzzer {'ativado' if enabled else 'desativado'}")
 
-    def _on_beat(self, beat: int, scheduled_ns: int, actual_ns: int, bpm: int) -> None:
+    def _on_beat(
+        self,
+        beat: int,
+        scheduled_ns: int,
+        actual_ns: int,
+        bpm: int,
+    ) -> None:
         self.logger.log(beat, scheduled_ns, actual_ns, bpm)
         self.worker.trigger(beat)
         error_ms = (actual_ns - scheduled_ns) / 1_000_000
@@ -488,9 +629,11 @@ class MetronomeApp:
 
     def setup(self) -> None:
         load_state(self.config.state_file, self.state)
+
         self.hardware.register_button(self.config.button_up_gpio, self._on_up)
         self.hardware.register_button(self.config.button_down_gpio, self._on_down)
         self.hardware.register_button(self.config.button_toggle_gpio, self._on_toggle)
+
         self.hardware.set_led(0.12)
         self.hardware.set_servo_angle(0.0)
         self.worker.start()
@@ -510,42 +653,104 @@ class MetronomeApp:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Metrônomo com Raspberry Pi 3, PWM, servo, buzzer e botões")
-    p.add_argument("--bpm", type=int, default=60, help="BPM inicial (30-240)")
-    p.add_argument("--passive-buzzer", action="store_true", help="gera tom PWM; omita para buzzer ativo")
-    p.add_argument("--no-buzzer", action="store_true", help="inicia com buzzer desativado")
-    p.add_argument("--dry-run", action="store_true", help="executa sem GPIO e imprime eventos")
-    p.add_argument("--beats", type=int, default=None, help="encerra após N batidas")
-    p.add_argument("--start-at", type=str, help="horário ISO 8601 com fuso para a primeira batida")
-    p.add_argument("--rt-priority", type=int, default=None, help="prioridade SCHED_FIFO opcional (requer permissão)")
-    p.add_argument("--cpu-core", type=int, default=None, help="fixa o processo em um núcleo")
-    p.add_argument("--state-file", type=str, default=None)
-    p.add_argument("--timing-csv", type=str, default=None)
-    return p
+    parser = argparse.ArgumentParser(
+        description=(
+            "Metrônomo para Raspberry Pi 3 com Freenove Projects Board v1.2 "
+            "e biblioteca gpiozero"
+        )
+    )
+    parser.add_argument("--bpm", type=int, default=60, help="BPM inicial (30-240)")
+    parser.add_argument(
+        "--passive-buzzer",
+        action="store_true",
+        help="usa o buzzer passivo em GPIO4; por padrão usa o ativo em GPIO12",
+    )
+    parser.add_argument(
+        "--no-buzzer",
+        action="store_true",
+        help="inicia com o buzzer desativado",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="executa sem acessar as GPIOs",
+    )
+    parser.add_argument(
+        "--beats",
+        type=int,
+        default=None,
+        help="encerra automaticamente após N batidas",
+    )
+    parser.add_argument(
+        "--start-at",
+        type=str,
+        help="horário ISO 8601 com fuso para a primeira batida",
+    )
+    parser.add_argument(
+        "--rt-priority",
+        type=int,
+        default=None,
+        help="prioridade SCHED_FIFO opcional",
+    )
+    parser.add_argument(
+        "--cpu-core",
+        type=int,
+        default=None,
+        help="fixa o processo em um núcleo",
+    )
+    parser.add_argument("--state-file", type=str, default=None)
+    parser.add_argument("--timing-csv", type=str, default=None)
+    return parser
+
+
+def print_board_setup(config: Config) -> None:
+    buzzer_gpio = (
+        config.passive_buzzer_gpio
+        if config.passive_buzzer
+        else config.active_buzzer_gpio
+    )
+    buzzer_name = "passivo" if config.passive_buzzer else "ativo"
+
+    print("Freenove Projects Board v1.2 — configuração BCM")
+    print(f"  LED azul: GPIO{config.led_gpio}")
+    print(f"  Servo SIG: GPIO{config.servo_gpio}")
+    print(f"  Buzzer {buzzer_name}: GPIO{buzzer_gpio}")
+    print(f"  S1 BPM+: GPIO{config.button_up_gpio}")
+    print(f"  S2 BPM-: GPIO{config.button_down_gpio}")
+    print(f"  S3 buzzer: GPIO{config.button_toggle_gpio}")
+    print("  Chaves: função 2 ON; função 5 ON; função 3 ON para buzzer ativo")
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    cfg = Config(
+
+    config = Config(
         bpm=args.bpm,
         passive_buzzer=args.passive_buzzer,
         buzzer_enabled=not args.no_buzzer,
     )
+
     if args.state_file:
-        cfg.state_file = args.state_file
+        config.state_file = args.state_file
     if args.timing_csv:
-        cfg.timing_csv = args.timing_csv
+        config.timing_csv = args.timing_csv
 
     configure_process(args.rt_priority, args.cpu_core)
     clock = RealClock()
-    hardware: HardwareBackend = MockBackend(clock) if args.dry_run else PigpioBackend(cfg)
-    app = MetronomeApp(cfg, hardware, clock)
 
-    def _request_stop(_signum: int, _frame: object) -> None:
+    if args.dry_run:
+        hardware: HardwareBackend = MockBackend(clock)
+    else:
+        print_board_setup(config)
+        hardware = GPIOZeroBackend(config)
+
+    app = MetronomeApp(config, hardware, clock)
+
+    def request_stop(_signum: int, _frame: object) -> None:
         app.stop_event.set()
 
-    signal.signal(signal.SIGINT, _request_stop)
-    signal.signal(signal.SIGTERM, _request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
 
     try:
         if args.start_at:
@@ -558,6 +763,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Eventos simulados: {len(hardware.events)}")
         for event in hardware.events[-12:]:
             print(event)
+
     return 0
 
 
