@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from metronome import BeatScheduler, Config, TempoState, atomic_save_json, load_state
+from metronome import BeatScheduler, Config, TempoState
 
 
 class FakeClock:
@@ -60,13 +59,3 @@ def test_absolute_scheduler_does_not_accumulate_callback_time() -> None:
     scheduler.run(max_beats=100)
     assert max(abs(e) for e in errors) == 0
     assert clock.now_ns == 1_982_000_000
-
-
-def test_atomic_persistence_roundtrip(tmp_path: Path) -> None:
-    target = tmp_path / "state.json"
-    atomic_save_json(target, {"bpm": 95, "buzzer_enabled": False})
-    assert json.loads(target.read_text(encoding="utf-8"))["bpm"] == 95
-
-    state = TempoState(Config())
-    load_state(target, state)
-    assert state.snapshot() == (95, False)

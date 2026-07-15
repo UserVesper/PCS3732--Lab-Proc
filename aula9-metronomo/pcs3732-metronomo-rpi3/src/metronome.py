@@ -25,16 +25,13 @@ Restrições da placa:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import queue
 import signal
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, Optional, Protocol
 
 
@@ -92,9 +89,6 @@ class Config:
     # Debounce realizado pelo gpiozero
     debounce_seconds: float = 0.20
 
-    state_file: str = "/var/lib/rpi3-metronomo/state.json"
-    timing_csv: str = "/var/log/rpi3-metronomo/timing.csv"
-
 
 class TempoState:
     """Estado concorrente do metrônomo, protegido por lock."""
@@ -126,15 +120,6 @@ class TempoState:
         with self._lock:
             self._buzzer_enabled = not self._buzzer_enabled
             return self._buzzer_enabled
-
-    def restore(self, bpm: int, buzzer_enabled: bool) -> None:
-        with self._lock:
-            self._bpm = max(self._min_bpm, min(int(bpm), self._max_bpm))
-            self._buzzer_enabled = bool(buzzer_enabled)
-
-    def to_dict(self) -> dict[str, object]:
-        bpm, enabled = self.snapshot()
-        return {"bpm": bpm, "buzzer_enabled": enabled}
 
 
 class HardwareBackend(Protocol):
@@ -335,31 +320,6 @@ class MockBackend:
         self._record("backend", "closed")
 
 
-class TimingLogger:
-    def __init__(self, path: str | Path | None):
-        self.path = Path(path) if path else None
-        self._lock = threading.Lock()
-        self._initialized = False
-
-    def log(self, beat: int, scheduled_ns: int, actual_ns: int, bpm: int) -> None:
-        if self.path is None:
-            return
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self._lock:
-                mode = "a" if self._initialized or self.path.exists() else "w"
-                with self.path.open(mode, encoding="utf-8") as file:
-                    if mode == "w":
-                        file.write("beat,scheduled_ns,actual_ns,error_us,bpm\n")
-                    error_us = (actual_ns - scheduled_ns) / 1000.0
-                    file.write(
-                        f"{beat},{scheduled_ns},{actual_ns},{error_us:.3f},{bpm}\n"
-                    )
-                self._initialized = True
-        except OSError as exc:
-            print(f"Aviso: não foi possível registrar temporização: {exc}")
-
-
 class ActuatorWorker:
     """Executa LED, servo e buzzer sem bloquear o agendador."""
 
@@ -498,45 +458,6 @@ class BeatScheduler:
                 deadline = actual
 
 
-def atomic_save_json(path: str | Path, data: dict[str, object]) -> None:
-    """Grava JSON por arquivo temporário, fsync e substituição atômica."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=target.name + ".", dir=target.parent)
-    tmp = Path(tmp_name)
-
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            json.dump(data, file, ensure_ascii=False, indent=2)
-            file.write("\n")
-            file.flush()
-            os.fsync(file.fileno())
-
-        os.replace(tmp, target)
-
-        try:
-            dir_fd = os.open(target.parent, os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except (AttributeError, OSError):
-            pass
-    finally:
-        if tmp.exists():
-            tmp.unlink(missing_ok=True)
-
-
-def load_state(path: str | Path, state: TempoState) -> None:
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        state.restore(int(data["bpm"]), bool(data["buzzer_enabled"]))
-    except FileNotFoundError:
-        return
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        print(f"Aviso: estado persistido inválido; usando padrão: {exc}")
-
-
 def configure_process(rt_priority: int | None, cpu_core: int | None) -> None:
     if cpu_core is not None:
         try:
@@ -581,7 +502,6 @@ class MetronomeApp:
         self.hardware = hardware
         self.state = TempoState(config)
         self.stop_event = threading.Event()
-        self.logger = TimingLogger(config.timing_csv)
         self.worker = ActuatorWorker(hardware, self.state, config, self.clock)
         self.scheduler = BeatScheduler(
             self.state,
@@ -591,20 +511,12 @@ class MetronomeApp:
         )
         self._stopped = False
 
-    def _persist(self) -> None:
-        try:
-            atomic_save_json(self.config.state_file, self.state.to_dict())
-        except OSError as exc:
-            print(f"Aviso: falha ao persistir estado: {exc}")
-
     def _on_up(self) -> None:
         bpm = self.state.increase()
-        self._persist()
         print(f"S1: BPM alterado para {bpm}")
 
     def _on_down(self) -> None:
         bpm = self.state.decrease()
-        self._persist()
         print(f"S2: BPM alterado para {bpm}")
 
     def _on_toggle(self) -> None:
@@ -612,7 +524,6 @@ class MetronomeApp:
         if not enabled:
             # Desliga imediatamente; não espera o fim do pulso corrente.
             self.hardware.buzzer_off()
-        self._persist()
         print(f"S3: buzzer {'ativado' if enabled else 'desativado'}")
 
     def _on_beat(
@@ -622,14 +533,11 @@ class MetronomeApp:
         actual_ns: int,
         bpm: int,
     ) -> None:
-        self.logger.log(beat, scheduled_ns, actual_ns, bpm)
         self.worker.trigger(beat)
         error_ms = (actual_ns - scheduled_ns) / 1_000_000
         print(f"beat={beat:04d} bpm={bpm:3d} erro={error_ms:+.3f} ms")
 
     def setup(self) -> None:
-        load_state(self.config.state_file, self.state)
-
         self.hardware.register_button(self.config.button_up_gpio, self._on_up)
         self.hardware.register_button(self.config.button_down_gpio, self._on_down)
         self.hardware.register_button(self.config.button_toggle_gpio, self._on_toggle)
@@ -648,7 +556,6 @@ class MetronomeApp:
         self._stopped = True
         self.stop_event.set()
         self.worker.stop()
-        self._persist()
         self.hardware.close()
 
 
@@ -698,8 +605,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="fixa o processo em um núcleo",
     )
-    parser.add_argument("--state-file", type=str, default=None)
-    parser.add_argument("--timing-csv", type=str, default=None)
     return parser
 
 
@@ -729,11 +634,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         passive_buzzer=args.passive_buzzer,
         buzzer_enabled=not args.no_buzzer,
     )
-
-    if args.state_file:
-        config.state_file = args.state_file
-    if args.timing_csv:
-        config.timing_csv = args.timing_csv
 
     configure_process(args.rt_priority, args.cpu_core)
     clock = RealClock()

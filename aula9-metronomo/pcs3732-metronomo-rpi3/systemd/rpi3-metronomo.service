@@ -15,8 +15,6 @@ Nice=-5
 # Para SCHED_FIFO, configure LimitRTPRIO e use --rt-priority com cautela.
 LimitRTPRIO=20
 RuntimeDirectory=rpi3-metronomo
-StateDirectory=rpi3-metronomo
-LogsDirectory=rpi3-metronomo
 
 [Install]
 WantedBy=multi-user.target
